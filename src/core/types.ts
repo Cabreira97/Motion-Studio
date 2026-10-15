@@ -1,5 +1,5 @@
 /**
- * Core domain types for Frame Studio, a local-first screen recorder.
+ * Core domain types for Motion Studio, a local-first screen recorder.
  *
  * Everything here is plain data so it can be persisted as JSON in the local
  * SQLite store and passed between the React UI and the Rust/Tauri layer.

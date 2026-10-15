@@ -1,9 +1,9 @@
 {
-  "name": "frame-studio-local",
+  "name": "motion-studio-local",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Frame Studio: a personal, local-first screen recorder that auto-zooms on the cursor, trims, and exports shareable videos.",
+  "description": "Motion Studio: a personal, local-first screen recorder that auto-zooms on the cursor, trims, and exports shareable videos.",
   "scripts": {
     "bootstrap": "node scripts/bootstrap.mjs",
     "first-run": "node scripts/bootstrap.mjs && tauri dev",

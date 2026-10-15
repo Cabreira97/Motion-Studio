@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { requireFfmpeg, resolveFfprobe } from "../../src/platform/ffmpegPath.js";
 
-export function makeTempDir(prefix = "frame-studio-test-"): string {
+export function makeTempDir(prefix = "motion-studio-test-"): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), prefix));
   return dir;
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the local Frame Studio window.",
+  "description": "Capabilities for the local Motion Studio window.",
   "windows": ["main"],
   "permissions": [
     "core:default",

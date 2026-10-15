@@ -1,4 +1,4 @@
-# Frame Studio
+# Motion Studio
 
 A personal, **local-first** screen recorder. Record your screen, and it
 auto-zooms on the cursor with smooth framing, lets you trim non-destructively,
@@ -105,13 +105,13 @@ configured, exports still succeed and simply skip the transcript.
 Recordings, exports and the SQLite database are stored in the OS app-data
 directory:
 
-- **Windows**: `%APPDATA%\com.local.framestudio`
-- **macOS**: `~/Library/Application Support/com.local.framestudio`
-- **Linux**: `~/.local/share/com.local.framestudio`
+- **Windows**: `%APPDATA%\com.local.motionstudio`
+- **macOS**: `~/Library/Application Support/com.local.motionstudio`
+- **Linux**: `~/.local/share/com.local.motionstudio`
 
 ```
-com.local.framestudio/
-  frame-studio.sqlite       # project records (paths, trims, zoom, callouts)
+com.local.motionstudio/
+  motion-studio.sqlite       # project records (paths, trims, zoom, callouts)
   recordings/               # original captures (never modified)
     exports/                # rendered videos + posters/transcripts/summaries
 ```

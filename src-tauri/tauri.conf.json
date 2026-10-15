@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Frame Studio",
+  "productName": "Motion Studio",
   "version": "0.1.0",
-  "identifier": "com.local.framestudio",
+  "identifier": "com.local.motionstudio",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Frame Studio",
+        "title": "Motion Studio",
         "width": 1280,
         "height": 840,
         "minWidth": 960,

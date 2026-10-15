@@ -7,7 +7,7 @@ import type { Project } from "../core/types.js";
  * real user data stays on the machine.
  */
 
-const STORAGE_KEY = "frame-studio:projects";
+const STORAGE_KEY = "motion-studio:projects";
 const SCHEMA_VERSION = 1;
 
 interface StorageShape {
