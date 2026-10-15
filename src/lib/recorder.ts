@@ -192,9 +192,11 @@ export class ScreenRecorder {
 
     const videoTrack = this.displayStream.getVideoTracks()[0];
     if (!videoTrack) throw new Error("No video track was returned by the capture source.");
-    const settings = videoTrack.getSettings();
-    this.resultWidth = settings.width ?? 1920;
-    this.resultHeight = settings.height ?? 1080;
+    // Best effort only, and re-read at stop: a display track reports its real
+    // size once frames are flowing, and before the first one WebKitGTK answers
+    // with a placeholder (112×112 on a 4K monitor). Left at 0 when unknown
+    // rather than guessing a resolution the export would then act on.
+    this.readDimensions(videoTrack);
 
     const tracks: MediaStreamTrack[] = [videoTrack];
 
@@ -234,8 +236,19 @@ export class ScreenRecorder {
       this.recorderError = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
       console.error("MediaRecorder failed:", cause);
     };
-    this.recorder.start(1000);
+    // No timeslice. WebKitGTK restarts its muxer for every slice instead of
+    // continuing the stream: a sliced recording came out as two back-to-back
+    // EBML headers with an empty `Tracks` element and not one frame. Nothing
+    // here consumes the intermediate chunks anyway — the blob is only read at
+    // stop — so slicing was pure risk.
+    this.recorder.start();
     this.startedAt = performance.now();
+  }
+
+  private readDimensions(track: MediaStreamTrack): void {
+    const settings = track.getSettings();
+    if (settings.width) this.resultWidth = settings.width;
+    if (settings.height) this.resultHeight = settings.height;
   }
 
   private cleanup(): void {
@@ -253,6 +266,9 @@ export class ScreenRecorder {
     const finished = new Promise<void>((resolve) => {
       recorder.onstop = () => resolve();
     });
+    // Read the size while the track is still running: by now it has delivered
+    // frames, so this is the first point the reported size can be trusted.
+    if (this.videoTrack) this.readDimensions(this.videoTrack);
     if (recorder.state !== "inactive") recorder.stop();
     await finished;
 
