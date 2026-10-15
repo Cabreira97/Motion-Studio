@@ -10,10 +10,6 @@
     "dialog:default",
     "opener:default",
     "clipboard-manager:default",
-    "fs:default",
-    {
-      "identifier": "fs:scope",
-      "allow": [{ "path": "$APPDATA/**" }]
-    }
+    "fs:default"
   ]
 }
