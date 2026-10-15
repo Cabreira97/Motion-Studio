@@ -47,7 +47,7 @@ pub fn run() {
             std::fs::create_dir_all(&recordings_dir)?;
 
             let store = Store::open(&data_dir.join("motion-studio.sqlite"))
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
 
             app.manage(AppState {
                 store: Mutex::new(store),

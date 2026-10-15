@@ -170,7 +170,7 @@ pub fn reveal_in_folder(path: &str) -> Result<(), String> {
             .arg(format!("/select,{}", p.display()))
             .spawn()
             .map_err(|e| e.to_string())?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "macos")]
     {
@@ -179,7 +179,7 @@ pub fn reveal_in_folder(path: &str) -> Result<(), String> {
             .arg(p)
             .spawn()
             .map_err(|e| e.to_string())?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {

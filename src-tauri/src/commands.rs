@@ -90,8 +90,12 @@ pub fn get_app_info(state: State<'_, AppState>) -> AppInfo {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default(),
         recordings_dir: data_dir.to_string_lossy().to_string(),
-        ffmpeg_path: media::ffmpeg_path().ok().map(|p| p.to_string_lossy().to_string()),
-        ffprobe_path: media::ffprobe_path().ok().map(|p| p.to_string_lossy().to_string()),
+        ffmpeg_path: media::ffmpeg_path()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string()),
+        ffprobe_path: media::ffprobe_path()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string()),
         cursor_sampling: state.cursor.is_supported(),
         whisper_available: whisper_configured(),
     }
@@ -125,8 +129,10 @@ pub fn run_ffmpeg(app: AppHandle, args: Vec<String>) -> Result<ProcessOutput, St
     let mut full = args[1..].to_vec();
     // Ask ffmpeg for machine-readable progress on stdout (inserted before the
     // output path, which the planner always places last).
-    if stem == "ffmpeg" && full.len() >= 1 {
-        let output = full.pop().ok_or_else(|| "missing output path".to_string())?;
+    if stem == "ffmpeg" && !full.is_empty() {
+        let output = full
+            .pop()
+            .ok_or_else(|| "missing output path".to_string())?;
         full.push("-nostats".into());
         full.push("-progress".into());
         full.push("pipe:1".into());
@@ -275,9 +281,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn copy_path(app: AppHandle, text: String) -> Result<(), String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
-    app.clipboard()
-        .write_text(text)
-        .map_err(|e| e.to_string())
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
 /// Best-effort lookup of a system font usable by ffmpeg `drawtext` for callouts.
@@ -366,12 +370,20 @@ pub fn emit_tick(app: AppHandle, state: State<'_, AppState>) {
 
 #[tauri::command]
 pub fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectRow>, String> {
-    state.store.lock().map_err(|e| e.to_string())?.list_projects()
+    state
+        .store
+        .lock()
+        .map_err(|e| e.to_string())?
+        .list_projects()
 }
 
 #[tauri::command]
 pub fn get_project(state: State<'_, AppState>, id: String) -> Result<Option<ProjectRow>, String> {
-    state.store.lock().map_err(|e| e.to_string())?.get_project(&id)
+    state
+        .store
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get_project(&id)
 }
 
 #[tauri::command]
@@ -384,7 +396,8 @@ pub fn save_project(
     data: String,
 ) -> Result<(), String> {
     // Validate the payload is JSON before persisting.
-    serde_json::from_str::<serde_json::Value>(&data).map_err(|e| format!("invalid project json: {e}"))?;
+    serde_json::from_str::<serde_json::Value>(&data)
+        .map_err(|e| format!("invalid project json: {e}"))?;
     state
         .store
         .lock()
@@ -394,7 +407,11 @@ pub fn save_project(
 
 #[tauri::command]
 pub fn delete_project(state: State<'_, AppState>, id: String) -> Result<bool, String> {
-    state.store.lock().map_err(|e| e.to_string())?.delete_project(&id)
+    state
+        .store
+        .lock()
+        .map_err(|e| e.to_string())?
+        .delete_project(&id)
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +467,15 @@ fn run_whisper(audio_path: &str) -> Result<TranscriptResult, String> {
     let out_base = temp_dir.join(&stem);
     let started = Instant::now();
     let status = Command::new(bin)
-        .args(["-m", &model, "-f", &wav_path.to_string_lossy(), "-oj", "-of", &out_base.to_string_lossy()])
+        .args([
+            "-m",
+            &model,
+            "-f",
+            &wav_path.to_string_lossy(),
+            "-oj",
+            "-of",
+            &out_base.to_string_lossy(),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

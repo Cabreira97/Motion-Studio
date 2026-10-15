@@ -5,8 +5,6 @@
 //! page title) can never escape the target directory or collide with a
 //! reserved device name.
 
-const DEFAULT_MAX: usize = 80;
-
 const RESERVED: &[&str] = &[
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -35,7 +33,9 @@ pub fn sanitize(input: &str, fallback: &str, max_len: usize) -> String {
     name = collapse(&name, '-');
     name = collapse(&name, ' ');
     name = name.trim().to_string();
-    name = name.trim_matches(|c| c == '.' || c == '-' || c == ' ').to_string();
+    name = name
+        .trim_matches(|c| c == '.' || c == '-' || c == ' ')
+        .to_string();
 
     if name.chars().count() > max {
         let truncated: String = name.chars().take(max).collect();
@@ -48,11 +48,7 @@ pub fn sanitize(input: &str, fallback: &str, max_len: usize) -> String {
         return fallback.to_string();
     }
 
-    let stem = name
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let stem = name.split('.').next().unwrap_or("").to_ascii_lowercase();
     if RESERVED.contains(&stem.as_str()) {
         name = format!("_{name}");
     }
@@ -78,8 +74,9 @@ fn collapse(input: &str, ch: char) -> String {
 }
 
 /// Joins a directory and a sanitized filename.
+#[allow(dead_code)]
 pub fn safe_join(dir: &str, filename: &str) -> std::path::PathBuf {
-    std::path::Path::new(dir).join(sanitize(filename, "recording", DEFAULT_MAX))
+    std::path::Path::new(dir).join(sanitize(filename, "recording", 80))
 }
 
 #[cfg(test)]
@@ -94,7 +91,10 @@ mod tests {
     #[test]
     fn strips_separators_and_traversal() {
         assert_eq!(sanitize("../../etc/passwd", "x", 80), "etc-passwd");
-        assert_eq!(sanitize("C:\\Windows\\System32", "x", 80), "C-Windows-System32");
+        assert_eq!(
+            sanitize("C:\\Windows\\System32", "x", 80),
+            "C-Windows-System32"
+        );
         assert_eq!(sanitize("a/b\\c", "x", 80), "a-b-c");
     }
 

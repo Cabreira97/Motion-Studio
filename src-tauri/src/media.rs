@@ -83,19 +83,17 @@ pub fn resolve_tool(env_key: &str, tool: &str) -> Option<PathBuf> {
     if let Some(found) = find_on_path(tool) {
         return Some(found);
     }
-    for dir in fallback_dirs(tool) {
-        if dir.is_file() {
-            return Some(dir);
-        }
-    }
-    None
+    fallback_dirs(tool).into_iter().find(|dir| dir.is_file())
 }
 
 #[cfg(windows)]
 fn fallback_dirs(tool: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        let packages = PathBuf::from(local).join("Microsoft").join("WinGet").join("Packages");
+        let packages = PathBuf::from(local)
+            .join("Microsoft")
+            .join("WinGet")
+            .join("Packages");
         if let Ok(entries) = std::fs::read_dir(&packages) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_lowercase();
@@ -182,7 +180,7 @@ pub fn run_tool(args: &[String]) -> Result<ProcessOutput, String> {
         ffmpeg_path()?
     };
 
-    let mut cmd = Command::new(binary);
+    let mut cmd = Command::new(&binary);
     cmd.args(&args[1..]);
     apply_win_flags(&mut cmd);
 
@@ -228,8 +226,14 @@ pub fn probe(path: &str) -> Result<MediaInfo, String> {
     let raw: ProbeRaw =
         serde_json::from_str(&output.stdout).map_err(|e| format!("invalid ffprobe json: {e}"))?;
 
-    let video = raw.streams.iter().find(|s| s.codec_type.as_deref() == Some("video"));
-    let audio = raw.streams.iter().find(|s| s.codec_type.as_deref() == Some("audio"));
+    let video = raw
+        .streams
+        .iter()
+        .find(|s| s.codec_type.as_deref() == Some("video"));
+    let audio = raw
+        .streams
+        .iter()
+        .find(|s| s.codec_type.as_deref() == Some("audio"));
     let duration_ms = raw
         .format
         .duration

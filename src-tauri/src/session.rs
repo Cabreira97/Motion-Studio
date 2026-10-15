@@ -76,7 +76,12 @@ impl Session {
                     .and_then(|guard| guard.map(|s| s.elapsed().as_millis() as u64))
                     .unwrap_or(0);
 
-                let _ = app.emit("recording://tick", TickPayload { elapsed_ms: elapsed });
+                let _ = app.emit(
+                    "recording://tick",
+                    TickPayload {
+                        elapsed_ms: elapsed,
+                    },
+                );
 
                 // Throttle window-title / tray-tooltip updates to ~1Hz.
                 if last_title.elapsed() >= Duration::from_millis(1000) {

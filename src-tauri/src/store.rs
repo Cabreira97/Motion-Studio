@@ -29,6 +29,7 @@ impl Store {
         Ok(store)
     }
 
+    #[allow(dead_code)]
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
         let store = Store { conn };
@@ -131,12 +132,14 @@ impl Store {
         Ok(changed > 0)
     }
 
+    #[allow(dead_code)]
     pub fn count_projects(&self) -> Result<i64, String> {
         self.conn
             .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
             .map_err(|e| e.to_string())
     }
 
+    #[allow(dead_code)]
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
         self.conn
             .execute(
@@ -148,11 +151,14 @@ impl Store {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, String> {
         self.conn
-            .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(|e| e.to_string())
     }
@@ -185,7 +191,9 @@ mod tests {
     fn upsert_updates_existing() {
         let store = store();
         store.upsert_project("p1", "One", 1, 1, "{}").unwrap();
-        store.upsert_project("p1", "One Renamed", 1, 5, r#"{"n":2}"#).unwrap();
+        store
+            .upsert_project("p1", "One Renamed", 1, 5, r#"{"n":2}"#)
+            .unwrap();
         let row = store.get_project("p1").unwrap().unwrap();
         assert_eq!(row.name, "One Renamed");
         assert_eq!(row.data, r#"{"n":2}"#);
@@ -208,6 +216,9 @@ mod tests {
         store.set_setting("theme", "dark").unwrap();
         assert_eq!(store.get_setting("theme").unwrap().as_deref(), Some("dark"));
         store.set_setting("theme", "light").unwrap();
-        assert_eq!(store.get_setting("theme").unwrap().as_deref(), Some("light"));
+        assert_eq!(
+            store.get_setting("theme").unwrap().as_deref(),
+            Some("light")
+        );
     }
 }
