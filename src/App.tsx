@@ -8,6 +8,7 @@ import {
   toAssetUrl,
   type AppInfo,
   type CaptureCapabilities,
+  type TickPayload,
 } from "./lib/bridge.js";
 import { ScreenRecorder, recorderSupported } from "./lib/recorder.js";
 import { loadProjects, persistProject, removeProject } from "./lib/projects.js";
@@ -236,7 +237,9 @@ export default function App() {
   useEffect(() => {
     if (!isTauri()) return;
     const disposers: Array<() => void> = [];
-    void listen<number>("recording://tick", (ms) => setElapsedMs(ms)).then((d) => disposers.push(d));
+    void listen<TickPayload>("recording://tick", (tick) => setElapsedMs(tick.elapsedMs)).then((d) =>
+      disposers.push(d),
+    );
     void listen<null>("recording://stop-requested", () => void handleStop()).then((d) =>
       disposers.push(d),
     );
