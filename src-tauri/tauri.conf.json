@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Screen Studio Local",
+  "productName": "Frame Studio",
   "version": "0.1.0",
-  "identifier": "com.local.screenstudio",
+  "identifier": "com.local.framestudio",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Screen Studio (local)",
+        "title": "Frame Studio",
         "width": 1280,
         "height": 840,
         "minWidth": 960,
@@ -26,6 +26,7 @@
       "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost blob:; media-src 'self' blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
+        "scope": [{ "path": "$APPDATA/**" }]
       }
     }
   },
@@ -41,4 +42,3 @@
     ]
   }
 }
-

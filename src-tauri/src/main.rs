@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    screen_studio_lib::run();
+    frame_studio_lib::run();
 }

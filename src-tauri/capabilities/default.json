@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the local Screen Studio window.",
+  "description": "Capabilities for the local Frame Studio window.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -11,10 +11,9 @@
     "opener:default",
     "clipboard-manager:default",
     "fs:default",
-    "fs:allow-read-file",
     {
       "identifier": "fs:scope",
+      "allow": [{ "path": "$APPDATA/**" }]
     }
   ]
 }
-

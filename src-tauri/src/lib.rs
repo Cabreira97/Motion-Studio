@@ -1,4 +1,4 @@
-//! Screen Studio (local) — Tauri entry point.
+//! Frame Studio — Tauri entry point.
 //!
 //! Architecture: the React webview owns capture (getDisplayMedia + MediaRecorder)
 //! and the pure render planner; this Rust side owns the OS integration that a
@@ -46,7 +46,7 @@ pub fn run() {
             let recordings_dir = data_dir.join("recordings");
             std::fs::create_dir_all(&recordings_dir)?;
 
-            let store = Store::open(&data_dir.join("screen-studio.sqlite"))
+            let store = Store::open(&data_dir.join("frame-studio.sqlite"))
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
             app.manage(AppState {

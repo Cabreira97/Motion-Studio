@@ -25,7 +25,7 @@ export function buildSummaryMarkdown(options: SummaryOptions): string {
 
   lines.push(`# ${project.name}`);
   lines.push("");
-  lines.push(`> Auto-generated summary for a local Screen Studio export.`);
+  lines.push(`> Auto-generated summary for a Frame Studio export.`);
   lines.push("");
   lines.push(`- **Generated:** ${new Date(generatedAt).toISOString()}`);
   lines.push(`- **Capture:** ${project.capture.kind}${project.capture.sourceLabel ? ` — ${project.capture.sourceLabel}` : ""}`);

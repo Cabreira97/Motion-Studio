@@ -127,7 +127,7 @@ export default function App() {
       const recorder = recorderRef.current;
       if (recorder) setElapsedMs(recorder.elapsedMs);
     }, 200);
-    document.title = `● ${formatDuration(elapsedMs)} — Screen Studio (local)`;
+    document.title = `● ${formatDuration(elapsedMs)} — Frame Studio`;
     return () => {
       if (timerRef.current !== null) window.clearInterval(timerRef.current);
       timerRef.current = null;
@@ -135,7 +135,7 @@ export default function App() {
   }, [recState, elapsedMs]);
 
   useEffect(() => {
-    if (recState !== "recording") document.title = "Screen Studio (local)";
+    if (recState !== "recording") document.title = "Frame Studio";
   }, [recState]);
 
   const handleStop = useCallback(async () => {
@@ -304,7 +304,7 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand__dot" />
-          <strong>Screen&nbsp;Studio</strong>
+          <strong>Frame&nbsp;Studio</strong>
           <span className="muted">local</span>
         </div>
         <nav className="nav">

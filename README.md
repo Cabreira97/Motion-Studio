@@ -1,9 +1,9 @@
-# Screen Studio (local)
+# Frame Studio
 
-A personal, **local-first** replacement for Screen Studio. Record your screen,
-and it automatically zooms toward the pointer, adds padding and rounded corners,
-lets you trim non-destructively, and exports a shareable MP4/WebM — along with a
-poster frame and (optionally) a transcript and Markdown summary.
+A personal, **local-first** screen recorder. Record your screen, and it
+auto-zooms on the cursor with smooth framing, lets you trim non-destructively,
+and exports shareable H.264/WebM videos — plus a poster frame, transcript and
+Markdown summary. Built with Tauri 2, React, TypeScript, ffmpeg and SQLite.
 
 Everything runs on your machine. There are **no accounts, no billing, no
 telemetry, no analytics, and no hosted control plane**.
@@ -105,13 +105,13 @@ configured, exports still succeed and simply skip the transcript.
 Recordings, exports and the SQLite database are stored in the OS app-data
 directory:
 
-- **Windows**: `%APPDATA%\com.local.screenstudio`
-- **macOS**: `~/Library/Application Support/com.local.screenstudio`
-- **Linux**: `~/.local/share/com.local.screenstudio`
+- **Windows**: `%APPDATA%\com.local.framestudio`
+- **macOS**: `~/Library/Application Support/com.local.framestudio`
+- **Linux**: `~/.local/share/com.local.framestudio`
 
 ```
-com.local.screenstudio/
-  screen-studio.sqlite      # project records (paths, trims, zoom, callouts)
+com.local.framestudio/
+  frame-studio.sqlite       # project records (paths, trims, zoom, callouts)
   recordings/               # original captures (never modified)
     exports/                # rendered videos + posters/transcripts/summaries
 ```

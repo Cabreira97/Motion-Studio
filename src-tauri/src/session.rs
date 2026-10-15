@@ -93,7 +93,7 @@ impl Session {
                 }
             }
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_title("Screen Studio (local)");
+                let _ = window.set_title("Frame Studio");
             }
             let _ = app.emit("recording://stopped", ());
         });
@@ -125,13 +125,13 @@ pub struct TrayHandle(pub std::sync::Mutex<Option<TrayIcon>>);
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let stop = MenuItem::with_id(app, "stop", "Stop recording", true, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "Show window", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Screen Studio", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Frame Studio", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&stop, &show, &separator, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
-        .tooltip("Screen Studio (local)")
+        .tooltip("Frame Studio")
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "quit" => app.exit(0),

@@ -64,7 +64,7 @@ function findFfmpeg() {
 }
 
 function main() {
-  console.log(`\n${C.bold}${C.cyan}Screen Studio (local) — first run${C.reset}\n`);
+  console.log(`\n${C.bold}${C.cyan}Frame Studio — first run${C.reset}\n`);
 
   const envLoaded = loadEnvFile();
   console.log(
@@ -143,10 +143,10 @@ function main() {
 
   const dataDir =
     process.platform === "win32"
-      ? join(process.env.APPDATA ?? "", "com.local.screenstudio")
+      ? join(process.env.APPDATA ?? "", "com.local.framestudio")
       : process.platform === "darwin"
-        ? join(os.homedir(), "Library", "Application Support", "com.local.screenstudio")
-        : join(process.env.XDG_DATA_HOME ?? join(os.homedir(), ".local", "share"), "com.local.screenstudio");
+        ? join(os.homedir(), "Library", "Application Support", "com.local.framestudio")
+        : join(process.env.XDG_DATA_HOME ?? join(os.homedir(), ".local", "share"), "com.local.framestudio");
 
   console.log(`\n${C.dim}Recordings and exports are stored in:${C.reset}\n  ${dataDir}`);
   console.log(`${C.dim}Everything stays on this machine. No accounts, no cloud.${C.reset}\n`);
