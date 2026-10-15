@@ -51,13 +51,6 @@ export function pickMimeType(hasAudio: boolean): string {
   return "video/webm";
 }
 
-function isOverconstrained(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error.name === "OverconstrainedError" || error.name === "TypeError")
-  );
-}
-
 /**
  * Builds display constraints out of only what this engine actually implements.
  *
@@ -74,7 +67,11 @@ export function buildDisplayConstraints(
   const supported = navigator.mediaDevices.getSupportedConstraints?.() ?? {};
   const video: MediaTrackConstraints & { displaySurface?: string } = {};
 
-  if (supported.frameRate) video.frameRate = { ideal: fps, max: 60 };
+  // `ideal` only. The Screen Capture spec rejects a display request outright if
+  // a constraint carries `min` or `exact`, and engines vary in how strictly they
+  // read the rest, so asking for a ceiling we do not need is a risk with no
+  // payoff — the requested rate is already the ideal.
+  if (supported.frameRate) video.frameRate = { ideal: fps };
   // Hint the OS picker so "window" surfaces windows first; "screen"/"region"
   // surface full monitors (region is a non-destructive crop applied on export).
   if ("displaySurface" in supported) {
@@ -82,6 +79,36 @@ export function buildDisplayConstraints(
   }
 
   return Object.keys(video).length > 0 ? video : true;
+}
+
+/**
+ * Turns a `getDisplayMedia` rejection into something a user can act on.
+ *
+ * The raw errors are too vague to place blame: `NotAllowedError` covers both a
+ * declined picker and an embedder that never answered WebKitGTK's permission
+ * signal, and `OverconstrainedError` arrives as a bare "Invalid constraint"
+ * that names neither the constraint nor the value. Repeat what was asked for,
+ * since that is the part we control.
+ */
+export function describeCaptureFailure(
+  error: unknown,
+  video: MediaTrackConstraints | true,
+): string {
+  const name = error instanceof Error ? error.name : "Error";
+  const detail = error instanceof Error ? error.message : String(error);
+  const asked = video === true ? "no constraints" : JSON.stringify(video);
+
+  switch (name) {
+    case "NotAllowedError":
+      return `Screen capture was refused (${detail}). Either the capture was declined in the system picker, or the webview denied it before the picker appeared.`;
+    case "OverconstrainedError":
+    case "TypeError":
+      return `The capture source rejected the requested settings (${name}: ${detail}). Requested: ${asked}.`;
+    case "NotFoundError":
+      return `No capture source was available (${detail}). The screen picker found nothing to share.`;
+    default:
+      return `Screen capture failed (${name}: ${detail}). Requested: ${asked}.`;
+  }
 }
 
 /** EBML id of a Matroska/WebM `Cluster`, the element every frame lives inside. */
@@ -151,19 +178,16 @@ export class ScreenRecorder {
     const fps = options.fps ?? 30;
     const video = buildDisplayConstraints(options.kind, fps);
     try {
+      // Must stay in the same synchronous turn as the click: `getDisplayMedia`
+      // spends the user gesture, so there is no retrying it. A second attempt
+      // fails with "must be called from a user gesture handler" and that
+      // message replaces the real reason the first attempt failed.
       this.displayStream = await navigator.mediaDevices.getDisplayMedia({
         video,
         audio: false,
       });
     } catch (error) {
-      // Last resort: an engine can advertise a constraint and still reject the
-      // value. Retry bare rather than losing a capture the user already
-      // approved in the OS picker.
-      if (video === true || !isOverconstrained(error)) throw error;
-      this.displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false,
-      });
+      throw new Error(describeCaptureFailure(error, video));
     }
 
     const videoTrack = this.displayStream.getVideoTracks()[0];

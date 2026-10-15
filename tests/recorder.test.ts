@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { buildDisplayConstraints, hasMediaClusters, pickMimeType } from "../src/lib/recorder.js";
+import {
+  buildDisplayConstraints,
+  describeCaptureFailure,
+  hasMediaClusters,
+  pickMimeType,
+} from "../src/lib/recorder.js";
 
 /** Replaces `MediaRecorder` with one that only supports `supported`. */
 function withSupportedTypes(supported: string[]): void {
@@ -75,6 +80,40 @@ describe("pickMimeType", () => {
   });
 });
 
+describe("describeCaptureFailure", () => {
+  function named(name: string, message: string): Error {
+    const error = new Error(message);
+    error.name = name;
+    return error;
+  }
+
+  it("repeats the constraints that were rejected", () => {
+    // "Invalid constraint" alone names neither the constraint nor the value.
+    const message = describeCaptureFailure(
+      named("OverconstrainedError", "Invalid constraint"),
+      { frameRate: { ideal: 30 } },
+    );
+    expect(message).toContain("Invalid constraint");
+    expect(message).toContain('{"frameRate":{"ideal":30}}');
+  });
+
+  it("names both causes of a refusal, since they are indistinguishable here", () => {
+    const message = describeCaptureFailure(named("NotAllowedError", "Permission denied"), true);
+    expect(message).toContain("declined in the system picker");
+    expect(message).toContain("denied it before the picker appeared");
+  });
+
+  it("keeps the name and message of an error it does not recognise", () => {
+    const message = describeCaptureFailure(named("InvalidAccessError", "gesture required"), true);
+    expect(message).toContain("InvalidAccessError");
+    expect(message).toContain("gesture required");
+  });
+
+  it("survives a thrown non-Error", () => {
+    expect(describeCaptureFailure("boom", true)).toContain("boom");
+  });
+});
+
 describe("hasMediaClusters", () => {
   it("rejects the header-only file a stalled muxer produces", async () => {
     const blob = fromHex(HEADER_ONLY_WEBM);
@@ -98,7 +137,7 @@ describe("buildDisplayConstraints", () => {
     const video = buildDisplayConstraints("window", 30);
     expect(video).not.toBe(true);
     expect(video).toMatchObject({
-      frameRate: { ideal: 30, max: 60 },
+      frameRate: { ideal: 30 },
       displaySurface: "window",
     });
   });
@@ -117,7 +156,7 @@ describe("buildDisplayConstraints", () => {
     // after the user has already picked a surface in the portal.
     withSupportedConstraints({ frameRate: true });
     const video = buildDisplayConstraints("window", 24);
-    expect(video).toEqual({ frameRate: { ideal: 24, max: 60 } });
+    expect(video).toEqual({ frameRate: { ideal: 24 } });
     expect(video).not.toHaveProperty("displaySurface");
   });
 
