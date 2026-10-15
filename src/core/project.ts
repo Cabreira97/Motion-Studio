@@ -1,4 +1,4 @@
-import { buildZoomTimeline } from "./cursor.js";
+import { buildZoomTimeline, toClipTime } from "./cursor.js";
 import { evenSize, getPreset, resolveOutputSize } from "./presets.js";
 import { formatDuration } from "./time.js";
 import { normalizeTrim } from "./trim.js";
@@ -96,8 +96,7 @@ export function withAutoZoom(
   if (!project.zoom.enabled) return { ...project, zoom: { ...project.zoom, intensity } };
   const durationMs = Math.max(0, project.trim.endMs - project.trim.startMs);
   const keyframes = buildZoomTimeline(
-    // Shift the raw track into clip-relative time.
-    project.cursorTrack.map((p) => ({ ...p, t: p.t - project.trim.startMs })),
+    toClipTime(project.cursorTrack, project.trim.startMs, durationMs),
     { durationMs, intensity, smoothingMs: project.cursorStyle.smoothingMs },
   );
   return { ...project, zoom: { keyframes, enabled: project.zoom.enabled, intensity } };

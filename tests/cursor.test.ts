@@ -5,6 +5,7 @@ import {
   easeInOut,
   evaluateZoom,
   scaleForIntensity,
+  toClipTime,
 } from "../src/core/cursor.js";
 import type { Point } from "../src/core/types.js";
 
@@ -141,5 +142,38 @@ describe("evaluateZoom", () => {
 
   it("falls back to a default when empty", () => {
     expect(evaluateZoom([], 123, 1.25)).toEqual({ scale: 1.25, cx: 0.5, cy: 0.5 });
+  });
+});
+
+describe("toClipTime", () => {
+  const source = track([
+    [0, 0.1, 0.1],
+    [500, 0.2, 0.2],
+    [1000, 0.3, 0.3],
+    [2500, 0.4, 0.4],
+    [4000, 0.5, 0.5],
+  ]);
+
+  it("rebases samples onto the clip timeline", () => {
+    // Trim starts at 1s, so the sample at 1000ms becomes the clip's t=0.
+    const clip = toClipTime(source, 1000, 2000);
+    expect(clip.map((p) => p.t)).toEqual([0, 1500]);
+    expect(clip[0]!.x).toBeCloseTo(0.3, 6);
+  });
+
+  it("drops samples before the trim start and after the duration", () => {
+    const clip = toClipTime(source, 1000, 1000);
+    expect(clip).toHaveLength(1);
+    expect(clip[0]!.t).toBe(0);
+  });
+
+  it("is a no-op for a zero offset and no duration cap", () => {
+    expect(toClipTime(source, 0)).toEqual(source);
+  });
+
+  it("ignores non-finite timestamps", () => {
+    const clip = toClipTime([{ t: NaN, x: 0, y: 0 }, { t: 100, x: 0.5, y: 0.5 }], 0);
+    expect(clip).toHaveLength(1);
+    expect(clip[0]!.t).toBe(100);
   });
 });

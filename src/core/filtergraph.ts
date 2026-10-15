@@ -20,7 +20,13 @@ export interface RenderPlan {
   trim: { startMs: number; endMs: number };
   crop: Rect;
   framing: Framing;
+  /** Keyframe times are clip-relative (0 = first frame after the trim). */
   zoom: { enabled: boolean; keyframes: ZoomKeyframe[] };
+  /**
+   * Cursor samples, also clip-relative. The overlay is drawn after
+   * `setpts=PTS-STARTPTS`, so a source-time track would drift by exactly the
+   * trim offset — use `toClipTime` before building a plan.
+   */
   cursor: { enabled: boolean; track: Point[] };
   cursorStyle: CursorStyle;
   callouts: Callout[];
@@ -28,8 +34,10 @@ export interface RenderPlan {
   outputPath: string;
   /** Absolute path to a `.ttf`/`.otf` used for callouts, if any. */
   fontFile?: string;
-  /** Optional path to a soft cursor-highlight PNG (input #1). */
+  /** Optional path to a soft cursor-highlight PNG. */
   cursorOverlayPath?: string;
+  /** Optional path to a rounded-corner wedge PNG (see `renderRoundedCornerMask`). */
+  cornerMaskPath?: string;
 }
 
 export interface BuiltGraph {
@@ -51,6 +59,29 @@ function isFullCrop(rect: Rect): boolean {
 function evenBelow(value: number, floor: number): number {
   const rounded = Math.floor(value / 2) * 2;
   return Math.max(floor, rounded);
+}
+
+/**
+ * Largest even size with the `src` aspect ratio that fits inside `box`.
+ *
+ * Computed here rather than delegated to `force_original_aspect_ratio=decrease`
+ * so the exact placement of the content inside the canvas is known at plan
+ * time — the rounded-corner overlays need to land on real pixel coordinates.
+ */
+export function fitInside(
+  srcW: number,
+  srcH: number,
+  boxW: number,
+  boxH: number,
+): { width: number; height: number } {
+  if (srcW <= 0 || srcH <= 0 || boxW <= 0 || boxH <= 0) {
+    return { width: Math.max(2, evenBelow(boxW, 2)), height: Math.max(2, evenBelow(boxH, 2)) };
+  }
+  const scale = Math.min(boxW / srcW, boxH / srcH);
+  return {
+    width: evenBelow(srcW * scale, 2),
+    height: evenBelow(srcH * scale, 2),
+  };
 }
 
 /** Resolves a normalized crop rect to even pixel dimensions inside the source. */
@@ -216,6 +247,11 @@ export function buildGraph(plan: RenderPlan): BuiltGraph {
 
   const inputs: string[] = [plan.sourcePath];
   const filters: string[] = [];
+  /** Registers a still-image input and returns its ffmpeg stream index. */
+  const addImageInput = (path: string): number => {
+    inputs.push(path);
+    return inputs.length - 1;
+  };
 
   const baseParts = [
     `trim=start=${startSec}:end=${endSec}`,
@@ -231,12 +267,12 @@ export function buildGraph(plan: RenderPlan): BuiltGraph {
   const useCursor = plan.cursor.enabled && plan.cursor.track.length > 0 && !!plan.cursorOverlayPath;
 
   if (useCursor) {
-    inputs.push(plan.cursorOverlayPath!);
+    const cursorInput = addImageInput(plan.cursorOverlayPath!);
     const { x, y } = cursorPositionExpr(plan.cursor.track, crop, baseW, baseH);
     filters.push(`[0:v]${baseParts.join(",")}[base]`);
     const diameter = evenBelow(framing.outputHeight * plan.cursorStyle.radiusScale * 2, 8);
     filters.push(
-      `[1:v]scale=${diameter}:${diameter}:flags=bicubic,format=rgba,loop=loop=-1:size=1:start=0[cur]`,
+      `[${cursorInput}:v]scale=${diameter}:${diameter}:flags=bicubic,format=rgba,loop=loop=-1:size=1:start=0[cur]`,
     );
     const end = endSec;
     filters.push(
@@ -252,13 +288,42 @@ export function buildGraph(plan: RenderPlan): BuiltGraph {
     current = "zoomed";
   }
 
+  // Scale to an explicitly computed size (instead of letting ffmpeg decide via
+  // force_original_aspect_ratio) so the content's position inside the canvas is
+  // known here — the rounded-corner overlays below need exact coordinates.
+  const fitted = fitInside(baseW, baseH, contentW, contentH);
+  const offsetX = evenBelow((out.width - fitted.width) / 2, 0);
+  const offsetY = evenBelow((out.height - fitted.height) / 2, 0);
+  filters.push(`[${current}]scale=${fitted.width}:${fitted.height}:flags=lanczos,setsar=1[fit]`);
   filters.push(
-    `[${current}]scale=${contentW}:${contentH}:force_original_aspect_ratio=decrease:flags=lanczos,setsar=1[fit]`,
-  );
-  filters.push(
-    `[fit]pad=${out.width}:${out.height}:(ow-iw)/2:(oh-ih)/2:color=${framing.background}[padded]`,
+    `[fit]pad=${out.width}:${out.height}:${offsetX}:${offsetY}:color=${framing.background}[padded]`,
   );
   current = "padded";
+
+  // Rounded framing: paint four background-coloured wedges over the content
+  // corners. Masking the whole frame with `geq` instead measured ~5x slower
+  // than the entire rest of the render.
+  const radius = Math.min(
+    Math.max(0, Math.round(framing.cornerRadiusPx)),
+    Math.floor(fitted.width / 2),
+    Math.floor(fitted.height / 2),
+  );
+  if (radius > 0 && plan.cornerMaskPath) {
+    const maskInput = addImageInput(plan.cornerMaskPath);
+    filters.push(
+      `[${maskInput}:v]scale=${radius}:${radius}:flags=bicubic,format=rgba,loop=loop=-1:size=1:start=0,split=4[tl][trRaw][blRaw][brRaw]`,
+    );
+    filters.push("[trRaw]hflip[tr]");
+    filters.push("[blRaw]vflip[bl]");
+    filters.push("[brRaw]hflip,vflip[br]");
+    const right = offsetX + fitted.width - radius;
+    const bottom = offsetY + fitted.height - radius;
+    filters.push(`[${current}][tl]overlay=${offsetX}:${offsetY}:shortest=1[corner1]`);
+    filters.push(`[corner1][tr]overlay=${right}:${offsetY}:shortest=1[corner2]`);
+    filters.push(`[corner2][bl]overlay=${offsetX}:${bottom}:shortest=1[corner3]`);
+    filters.push(`[corner3][br]overlay=${right}:${bottom}:shortest=1[rounded]`);
+    current = "rounded";
+  }
 
   const calloutFilters = plan.fontFile
     ? buildCalloutFilters(plan.callouts, {
@@ -270,7 +335,7 @@ export function buildGraph(plan: RenderPlan): BuiltGraph {
   if (calloutFilters.length > 0) {
     const fontArg = `:fontfile='${escapeFilterPath(plan.fontFile!)}'`;
     const chain = calloutFilters.map((f) => `${f}${fontArg}`).join(",");
-    filters.push(`[padded]${chain}[withtext]`);
+    filters.push(`[${current}]${chain}[withtext]`);
     current = "withtext";
   }
 
@@ -302,9 +367,10 @@ export function buildRenderArgs(plan: RenderPlan): string[] {
     "-i",
     plan.sourcePath,
   ];
-  if (graph.inputPaths.length > 1) {
-    // Looped still image for the cursor highlight.
-    args.push("-loop", "1", "-i", graph.inputPaths[1]!);
+  // Every extra input is a still image (cursor highlight, corner wedge) that
+  // must loop for the whole clip; the output `-t` below bounds the render.
+  for (const imagePath of graph.inputPaths.slice(1)) {
+    args.push("-loop", "1", "-i", imagePath);
   }
   args.push(
     "-filter_complex",

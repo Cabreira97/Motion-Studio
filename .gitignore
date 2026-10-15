@@ -24,3 +24,6 @@ Thumbs.db
 *.log
 npm-debug.log*
 pnpm-debug.log*
+
+# Local agent/editor tooling (dev-server launch config, etc.)
+.claude/

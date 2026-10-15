@@ -439,8 +439,20 @@ export default function App() {
             onChange={commit}
             onExport={() => void handleExport()}
             onBack={() => setView("library")}
-            onReveal={(path) => void bridge.revealPath(path).catch(() => {})}
-            onCopy={(path) => void bridge.copyPath(path).catch(() => {})}
+            onReveal={(path) =>
+              void bridge
+                .revealPath(path)
+                .catch((error) =>
+                  setExportError(t("error.revealFailed", { message: errMessage(error) })),
+                )
+            }
+            onCopy={(path) =>
+              void bridge
+                .copyPath(path)
+                .catch((error) =>
+                  setExportError(t("error.copyFailed", { message: errMessage(error) })),
+                )
+            }
           />
         )}
 

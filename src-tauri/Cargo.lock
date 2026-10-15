@@ -2291,6 +2291,7 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-opener",
  "windows-sys 0.59.0",
+ "x11-dl",
 ]
 
 [[package]]

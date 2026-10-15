@@ -69,6 +69,8 @@ export interface CaptureCapabilities {
   region: boolean;
   microphone: boolean;
   cursorSampling: boolean;
+  /** Why cursor sampling is unavailable, when it is (Wayland, no DISPLAY, …). */
+  cursorNote: string | null;
   backend: string;
 }
 
