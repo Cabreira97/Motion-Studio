@@ -36,6 +36,39 @@ export function pickMimeType(): string {
   return "video/webm";
 }
 
+function isOverconstrained(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "OverconstrainedError" || error.name === "TypeError")
+  );
+}
+
+/**
+ * Builds display constraints out of only what this engine actually implements.
+ *
+ * Sending a constraint an engine does not know rejects the whole call with
+ * `OverconstrainedError` ("Invalid constraint") — WebKitGTK does that for
+ * `displaySurface`, which kills recording on Linux after the user has already
+ * picked a surface in the portal. `getSupportedConstraints` is synchronous, so
+ * filtering here costs no user gesture.
+ */
+export function buildDisplayConstraints(
+  kind: CaptureKind,
+  fps: number,
+): MediaTrackConstraints | true {
+  const supported = navigator.mediaDevices.getSupportedConstraints?.() ?? {};
+  const video: MediaTrackConstraints & { displaySurface?: string } = {};
+
+  if (supported.frameRate) video.frameRate = { ideal: fps, max: 60 };
+  // Hint the OS picker so "window" surfaces windows first; "screen"/"region"
+  // surface full monitors (region is a non-destructive crop applied on export).
+  if ("displaySurface" in supported) {
+    video.displaySurface = kind === "window" ? "window" : "monitor";
+  }
+
+  return Object.keys(video).length > 0 ? video : true;
+}
+
 export function recorderSupported(): boolean {
   return (
     typeof navigator !== "undefined" &&
@@ -54,6 +87,8 @@ export class ScreenRecorder {
   private resultWidth = 0;
   private resultHeight = 0;
   private hasAudio = false;
+  private recorderError: string | null = null;
+  private videoTrack: MediaStreamTrack | null = null;
 
   get elapsedMs(): number {
     return this.startedAt === 0 ? 0 : performance.now() - this.startedAt;
@@ -68,17 +103,22 @@ export class ScreenRecorder {
     if (this.recorder) throw new Error("A recording is already in progress.");
 
     const fps = options.fps ?? 30;
-    // Hint the OS picker so "window" surfaces windows first; "screen"/"region"
-    // surface full monitors (region is a non-destructive crop applied on export).
-    const displaySurface = options.kind === "window" ? "window" : "monitor";
-    const video: MediaTrackConstraints & { displaySurface?: string } = {
-      frameRate: { ideal: fps, max: 60 },
-      displaySurface,
-    };
-    this.displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video,
-      audio: false,
-    });
+    const video = buildDisplayConstraints(options.kind, fps);
+    try {
+      this.displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video,
+        audio: false,
+      });
+    } catch (error) {
+      // Last resort: an engine can advertise a constraint and still reject the
+      // value. Retry bare rather than losing a capture the user already
+      // approved in the OS picker.
+      if (video === true || !isOverconstrained(error)) throw error;
+      this.displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+    }
 
     const videoTrack = this.displayStream.getVideoTracks()[0];
     if (!videoTrack) throw new Error("No video track was returned by the capture source.");
@@ -111,9 +151,18 @@ export class ScreenRecorder {
     const stream = new MediaStream(tracks);
     const mimeType = pickMimeType();
     this.chunks = [];
+    this.recorderError = null;
+    this.videoTrack = videoTrack;
     this.recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
     this.recorder.ondataavailable = (event) => {
       if (event.data.size > 0) this.chunks.push(event.data);
+    };
+    // An encoder that fails mid-recording reports it here and nowhere else;
+    // without this the only symptom is an empty blob at stop time.
+    this.recorder.onerror = (event) => {
+      const cause = (event as Event & { error?: unknown }).error;
+      this.recorderError = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
+      console.error("MediaRecorder failed:", cause);
     };
     this.recorder.start(1000);
     this.startedAt = performance.now();
@@ -146,11 +195,38 @@ export class ScreenRecorder {
       width: this.resultWidth,
       height: this.resultHeight,
     };
+    const diagnosis = this.diagnoseEmpty(mimeType);
     this.recorder = null;
     this.chunks = [];
+    this.videoTrack = null;
     this.cleanup();
-    if (blob.size === 0) throw new Error("The recording is empty — nothing was captured.");
+    if (blob.size === 0) throw new Error(diagnosis);
     return result;
+  }
+
+  /**
+   * Explains an empty recording with the facts that distinguish the causes.
+   *
+   * "Nothing was captured" alone is unactionable: an encoder that refused the
+   * format, a capture source that ended immediately, and a source that never
+   * produced a frame all look identical from the blob. Report what each one
+   * leaves behind instead.
+   */
+  private diagnoseEmpty(mimeType: string): string {
+    if (this.recorderError) {
+      return `The recorder failed while encoding (${this.recorderError}). Format: ${mimeType}.`;
+    }
+
+    const track = this.videoTrack;
+    if (track && track.readyState === "ended" && this.elapsedMs < 1500) {
+      return "The capture source ended immediately — the screen share was stopped or denied before any frame arrived.";
+    }
+
+    const size =
+      this.resultWidth > 0 && this.resultHeight > 0
+        ? `${this.resultWidth}×${this.resultHeight}`
+        : "unknown size";
+    return `The recording is empty — nothing was captured. Source: ${size}, track ${track?.readyState ?? "missing"}, format ${mimeType}.`;
   }
 
   /** Aborts without producing a result. */
