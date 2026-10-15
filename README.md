@@ -1,0 +1,179 @@
+# Screen Studio (local)
+
+A personal, **local-first** replacement for Screen Studio. Record your screen,
+and it automatically zooms toward the pointer, adds padding and rounded corners,
+lets you trim non-destructively, and exports a shareable MP4/WebM — along with a
+poster frame and (optionally) a transcript and Markdown summary.
+
+Everything runs on your machine. There are **no accounts, no billing, no
+telemetry, no analytics, and no hosted control plane**.
+
+---
+
+## Quick start (one command)
+
+Prerequisites, installed once:
+
+- **Node 20+**
+- **ffmpeg** on your `PATH`
+  - Windows: `winget install --id Gyan.FFmpeg -e`
+  - macOS: `brew install ffmpeg`
+  - Linux: `sudo apt install ffmpeg`
+- **Rust toolchain** (to build the desktop shell): <https://rustup.rs>
+  - On Windows also install the **MSVC C++ build tools** (Desktop development with C++).
+
+Then:
+
+```bash
+pnpm first-run
+```
+
+`pnpm first-run` runs `scripts/bootstrap.mjs` (checks the tools above and
+installs JavaScript dependencies), then launches the desktop app.
+
+Other useful scripts:
+
+```bash
+pnpm dev         # UI only, in a browser (no recording/export — desktop app needed)
+pnpm test        # unit tests + real-ffmpeg end-to-end tests
+pnpm typecheck   # TypeScript type checking
+pnpm build       # typecheck + production web build
+```
+
+> The browser dev server is for UI work. Recording, saving, and export require
+> the desktop app. In the browser the missing pieces surface as clear,
+> recoverable messages instead of failing silently.
+
+---
+
+## How it works
+
+```
+React webview (capture + edit UI)
+        │  MediaPorts / Transcriber
+        ▼
+Pure TypeScript core  (src/core)         ← all media planning logic
+        │  ffmpeg argv, no OS access
+        ▼
+Tauri (Rust) platform layer (src-tauri)  ← OS integration
+   • SQLite project store        • runs local ffmpeg/ffprobe (validated argv)
+   • recording session + timer    • cursor sampling
+   • system tray (stop)           • filesystem + clipboard + reveal
+```
+
+- **UI**: React + TypeScript. Screen/window capture uses the browser
+  `getDisplayMedia` (the OS shows its own picker) and `MediaRecorder`.
+- **`src/core`**: pure, dependency-free logic — trim math, cursor clustering,
+  auto-zoom keyframes, the ffmpeg filtergraph, presets, Markdown, validation.
+  It is the single source of truth and is fully unit-tested.
+- **Pipeline**: `src/core/pipeline.ts` orchestrates the render, poster,
+  transcript and summary. It runs identically against the Rust ports (in the
+  app) and the Node ports (in tests).
+- **`src-tauri`**: Rust owns everything the webview must not: SQLite, process
+  execution, tray, and cursor sampling. The webview can only ask it to run
+  `ffmpeg`/`ffprobe` with argv that passes validation.
+
+### The render graph (single source of truth)
+
+`trim → fps → optional crop → optional cursor highlight overlay → smooth
+zoompan (output at canvas size, so no aspect distortion) → scale-to-fit →
+pad + rounded framing → optional callouts → yuv420p`, then packaged by the
+chosen preset (H.264/MP4 or VP9/WebM). Poster, transcript and Markdown are
+written next to the video.
+
+---
+
+## Configuration
+
+Copy `.env.example` to `.env` (gitignored) to override defaults:
+
+| Variable | Purpose |
+| --- | --- |
+| `FFMPEG_PATH` | Explicit ffmpeg binary (otherwise auto-detected: env → PATH → winget) |
+| `FFPROBE_PATH` | Explicit ffprobe binary |
+| `WHISPER_CPP_BIN` | Path to a local `whisper.cpp` binary (enables transcription) |
+| `WHISPER_MODEL` | Path to a local whisper model (e.g. `ggml-base.en.bin`) |
+
+Secrets and machine-specific paths live only in `.env`, which is never
+committed. Transcription is entirely local and optional: if it is not
+configured, exports still succeed and simply skip the transcript.
+
+---
+
+## Where your data lives
+
+Recordings, exports and the SQLite database are stored in the OS app-data
+directory:
+
+- **Windows**: `%APPDATA%\com.local.screenstudio`
+- **macOS**: `~/Library/Application Support/com.local.screenstudio`
+- **Linux**: `~/.local/share/com.local.screenstudio`
+
+```
+com.local.screenstudio/
+  screen-studio.sqlite      # project records (paths, trims, zoom, callouts)
+  recordings/               # original captures (never modified)
+    exports/                # rendered videos + posters/transcripts/summaries
+```
+
+**Backup**: copy the whole directory. To restore, put it back in place — the
+app reads everything from there. Nothing is stored anywhere else.
+
+---
+
+## Platform notes
+
+### macOS screen recording & microphone permission
+
+The first time you record, macOS asks for **Screen Recording** and
+**Microphone** access:
+
+1. **System Settings → Privacy & Security → Screen Recording** → enable the app.
+2. **System Settings → Privacy & Security → Microphone** → enable the app.
+3. Quit and reopen the app — macOS requires a restart after granting screen
+   recording.
+
+Cursor sampling and the global tray "Stop" behave per-OS; where a permission is
+missing, the UI reports it instead of failing silently.
+
+### Windows
+
+ffmpeg installed via winget is auto-detected even if it is not on `PATH`. The
+first run in a fresh terminal may need `FFMPEG_PATH` if `PATH` has not refreshed.
+
+### Linux
+
+Install `ffmpeg` from your distro. Cursor sampling support depends on the
+display server (X11/Wayland) and degrades gracefully when unavailable.
+
+---
+
+## Privacy
+
+- No network calls, no analytics, no crash reporting, no auto-update pings.
+- All rendering uses your local ffmpeg; all transcription (if enabled) uses your
+  local whisper.cpp.
+- The only files written are your recordings, exports and the local database
+  under the app-data directory above.
+
+---
+
+## Development
+
+```bash
+pnpm install
+pnpm typecheck
+pnpm test         # unit tests + E2E (E2E requires ffmpeg on PATH)
+pnpm tauri dev    # run the desktop app (after Rust is installed)
+```
+
+Rust-side checks (after installing Rust):
+
+```bash
+cd src-tauri
+cargo test
+cargo build
+```
+
+The TypeScript core is where the interesting logic lives and is covered by the
+test suite; the Rust layer is intentionally thin and validated.
