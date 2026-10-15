@@ -4,6 +4,7 @@ import {
   describeCaptureFailure,
   hasMediaClusters,
   pickMimeType,
+  preferredCaptureSize,
 } from "../src/lib/recorder.js";
 
 /** Replaces `MediaRecorder` with one that only supports `supported`. */
@@ -49,9 +50,42 @@ function withSupportedConstraints(supported: Record<string, boolean>): void {
   });
 }
 
+function withScreen(width: number, height: number, ratio: number): void {
+  Object.defineProperty(globalThis, "screen", {
+    value: { width, height },
+    configurable: true,
+    writable: true,
+  });
+  Object.defineProperty(globalThis, "devicePixelRatio", {
+    value: ratio,
+    configurable: true,
+    writable: true,
+  });
+}
+
 afterEach(() => {
   Reflect.deleteProperty(globalThis, "navigator");
   Reflect.deleteProperty(globalThis, "MediaRecorder");
+  Reflect.deleteProperty(globalThis, "screen");
+  Reflect.deleteProperty(globalThis, "devicePixelRatio");
+});
+
+describe("preferredCaptureSize", () => {
+  it("asks for the screen in device pixels", () => {
+    withScreen(1920, 1080, 2);
+    expect(preferredCaptureSize()).toEqual({ width: 3840, height: 2160 });
+  });
+
+  it("rounds an odd side down to even", () => {
+    // I420 halves chroma in both axes, so an odd side has no valid chroma
+    // plane and the encoder refuses to configure.
+    withScreen(1365, 767, 1);
+    expect(preferredCaptureSize()).toEqual({ width: 1364, height: 766 });
+  });
+
+  it("falls back to 1080p with no screen to read", () => {
+    expect(preferredCaptureSize()).toEqual({ width: 1920, height: 1080 });
+  });
 });
 
 describe("pickMimeType", () => {
@@ -134,12 +168,29 @@ describe("hasMediaClusters", () => {
 describe("buildDisplayConstraints", () => {
   it("asks for the frame rate and the surface hint when both are supported", () => {
     withSupportedConstraints({ frameRate: true, displaySurface: true });
-    const video = buildDisplayConstraints("window", 30);
+    const video = buildDisplayConstraints("window", 30, { width: 2560, height: 1440 });
     expect(video).not.toBe(true);
     expect(video).toMatchObject({
       frameRate: { ideal: 30 },
       displaySurface: "window",
     });
+  });
+
+  it("asks for a real resolution so the engine cannot pick its smallest preset", () => {
+    // Left unasked, WebKitGTK negotiated 112x63 — right aspect, unusable size,
+    // and the odd height alone was enough to stop the encoder configuring.
+    withSupportedConstraints({ frameRate: true, width: true, height: true });
+    expect(buildDisplayConstraints("screen", 30, { width: 3840, height: 2160 })).toMatchObject({
+      width: { ideal: 3840 },
+      height: { ideal: 2160 },
+    });
+  });
+
+  it("omits the size on an engine that does not support it", () => {
+    withSupportedConstraints({ frameRate: true });
+    const video = buildDisplayConstraints("screen", 30, { width: 3840, height: 2160 });
+    expect(video).not.toHaveProperty("width");
+    expect(video).not.toHaveProperty("height");
   });
 
   it("maps screen and region to a whole monitor", () => {

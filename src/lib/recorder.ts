@@ -51,6 +51,26 @@ export function pickMimeType(hasAudio: boolean): string {
   return "video/webm";
 }
 
+export interface CaptureSize {
+  width: number;
+  height: number;
+}
+
+/**
+ * The resolution to ask a display source for: the screen in device pixels.
+ *
+ * Rounded down to even numbers because I420 — what every WebM encoder here
+ * consumes — stores chroma at half resolution in both axes, so an odd side has
+ * no valid chroma plane and the encoder refuses to configure.
+ */
+export function preferredCaptureSize(): CaptureSize {
+  const screen = typeof globalThis.screen === "object" ? globalThis.screen : null;
+  const ratio = typeof devicePixelRatio === "number" && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  const width = Math.round((screen?.width ?? 1920) * ratio);
+  const height = Math.round((screen?.height ?? 1080) * ratio);
+  return { width: width - (width % 2), height: height - (height % 2) };
+}
+
 /**
  * Builds display constraints out of only what this engine actually implements.
  *
@@ -63,6 +83,7 @@ export function pickMimeType(hasAudio: boolean): string {
 export function buildDisplayConstraints(
   kind: CaptureKind,
   fps: number,
+  size: CaptureSize = preferredCaptureSize(),
 ): MediaTrackConstraints | true {
   const supported = navigator.mediaDevices.getSupportedConstraints?.() ?? {};
   const video: MediaTrackConstraints & { displaySurface?: string } = {};
@@ -72,6 +93,12 @@ export function buildDisplayConstraints(
   // read the rest, so asking for a ceiling we do not need is a risk with no
   // payoff — the requested rate is already the ideal.
   if (supported.frameRate) video.frameRate = { ideal: fps };
+  // Ask for a real resolution. Left unasked, WebKitGTK negotiates its smallest
+  // preset — an observed 112x63, correct in aspect and useless in size. The odd
+  // height is the fatal part: the encoder cannot build an I420 chroma plane for
+  // it, so it never configures and the recording ends up as a bare header.
+  if (supported.width) video.width = { ideal: size.width };
+  if (supported.height) video.height = { ideal: size.height };
   // Hint the OS picker so "window" surfaces windows first; "screen"/"region"
   // surface full monitors (region is a non-destructive crop applied on export).
   if ("displaySurface" in supported) {
@@ -313,6 +340,13 @@ export class ScreenRecorder {
     // frame, which separates "nothing arrived" from "arrived but was not muxed".
     if (track?.muted) {
       return `The capture source delivered no frames (the track stayed muted) after ${Math.round(this.elapsedMs)}ms. The screen share was approved but never produced a picture.`;
+    }
+
+    // An odd side has no I420 chroma plane, so the encoder never configures and
+    // the muxer is left holding a header. Worth naming: the number alone does
+    // not look like a cause.
+    if (this.resultWidth % 2 !== 0 || this.resultHeight % 2 !== 0) {
+      return `The capture source produced an odd frame size (${this.resultWidth}×${this.resultHeight}), which the encoder cannot represent, so nothing was encoded.`;
     }
 
     const size =
