@@ -21,16 +21,31 @@ export interface RecordingResult {
   height: number;
 }
 
-const MIME_CANDIDATES = [
+const AV_MIME_CANDIDATES = [
   "video/webm;codecs=vp9,opus",
   "video/webm;codecs=vp8,opus",
-  "video/webm;codecs=vp9",
   "video/webm",
 ];
 
-export function pickMimeType(): string {
+const VIDEO_ONLY_MIME_CANDIDATES = [
+  "video/webm;codecs=vp9",
+  "video/webm;codecs=vp8",
+  "video/webm",
+];
+
+/**
+ * Picks a container that describes the tracks actually being recorded.
+ *
+ * Asking for `opus` on a video-only stream is not harmless: GStreamer (so
+ * WebKitGTK) muxes a stream it was told has audio and waits for buffers that
+ * never arrive, so `ondataavailable` never fires and the recording comes out
+ * empty at stop time. Chrome tolerates the mismatch, which is why this only
+ * shows up on Linux.
+ */
+export function pickMimeType(hasAudio: boolean): string {
   if (typeof MediaRecorder === "undefined") return "video/webm";
-  for (const candidate of MIME_CANDIDATES) {
+  const candidates = hasAudio ? AV_MIME_CANDIDATES : VIDEO_ONLY_MIME_CANDIDATES;
+  for (const candidate of candidates) {
     if (MediaRecorder.isTypeSupported(candidate)) return candidate;
   }
   return "video/webm";
@@ -67,6 +82,37 @@ export function buildDisplayConstraints(
   }
 
   return Object.keys(video).length > 0 ? video : true;
+}
+
+/** EBML id of a Matroska/WebM `Cluster`, the element every frame lives inside. */
+const CLUSTER_ID = [0x1f, 0x43, 0xb6, 0x75];
+
+/**
+ * Window scanned for the first cluster. The recorder is started with a 1s
+ * timeslice, so a working capture emits a cluster a few hundred bytes after the
+ * header — reading the whole blob (hundreds of MB) to learn the same thing
+ * would be pointless.
+ */
+const CLUSTER_SCAN_BYTES = 64 * 1024;
+
+/**
+ * Reports whether a recording contains any muxed frame.
+ *
+ * A stalled muxer still emits a valid-looking file: WebKitGTK produced a 178
+ * byte blob holding two EBML headers and a `Tracks` element with no entries,
+ * which is non-empty to `blob.size` and only fails later, in ffprobe, as
+ * "End of file". Looking for a cluster distinguishes "no frames" from "small
+ * recording" without guessing at a size threshold.
+ */
+export async function hasMediaClusters(blob: Blob): Promise<boolean> {
+  const head = new Uint8Array(await blob.slice(0, CLUSTER_SCAN_BYTES).arrayBuffer());
+  outer: for (let i = 0; i + CLUSTER_ID.length <= head.length; i += 1) {
+    for (let j = 0; j < CLUSTER_ID.length; j += 1) {
+      if (head[i + j] !== CLUSTER_ID[j]) continue outer;
+    }
+    return true;
+  }
+  return false;
 }
 
 export function recorderSupported(): boolean {
@@ -149,7 +195,7 @@ export class ScreenRecorder {
     });
 
     const stream = new MediaStream(tracks);
-    const mimeType = pickMimeType();
+    const mimeType = pickMimeType(this.hasAudio);
     this.chunks = [];
     this.recorderError = null;
     this.videoTrack = videoTrack;
@@ -186,7 +232,7 @@ export class ScreenRecorder {
     if (recorder.state !== "inactive") recorder.stop();
     await finished;
 
-    const mimeType = recorder.mimeType || pickMimeType();
+    const mimeType = recorder.mimeType || pickMimeType(this.hasAudio);
     const blob = new Blob(this.chunks, { type: mimeType });
     const result: RecordingResult = {
       blob,
@@ -195,12 +241,14 @@ export class ScreenRecorder {
       width: this.resultWidth,
       height: this.resultHeight,
     };
-    const diagnosis = this.diagnoseEmpty(mimeType);
+    // Diagnose before cleanup, while the track state is still readable.
+    const empty = blob.size === 0 || !(await hasMediaClusters(blob));
+    const diagnosis = empty ? this.diagnoseEmpty(mimeType) : "";
     this.recorder = null;
     this.chunks = [];
     this.videoTrack = null;
     this.cleanup();
-    if (blob.size === 0) throw new Error(diagnosis);
+    if (empty) throw new Error(diagnosis);
     return result;
   }
 
@@ -221,12 +269,17 @@ export class ScreenRecorder {
     if (track && track.readyState === "ended" && this.elapsedMs < 1500) {
       return "The capture source ended immediately — the screen share was stopped or denied before any frame arrived.";
     }
+    // A muted track is the capture source's own statement that it delivered no
+    // frame, which separates "nothing arrived" from "arrived but was not muxed".
+    if (track?.muted) {
+      return `The capture source delivered no frames (the track stayed muted) after ${Math.round(this.elapsedMs)}ms. The screen share was approved but never produced a picture.`;
+    }
 
     const size =
       this.resultWidth > 0 && this.resultHeight > 0
         ? `${this.resultWidth}×${this.resultHeight}`
         : "unknown size";
-    return `The recording is empty — nothing was captured. Source: ${size}, track ${track?.readyState ?? "missing"}, format ${mimeType}.`;
+    return `The recording holds no frames — the encoder wrote a header and nothing else. Source: ${size}, track ${track?.readyState ?? "missing"}, format ${mimeType}, ${Math.round(this.elapsedMs)}ms.`;
   }
 
   /** Aborts without producing a result. */
