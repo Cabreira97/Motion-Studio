@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { formatBytes, buildSummaryMarkdown } from "../src/core/markdown.js";
 import { StaticTranscriber } from "../src/core/transcript.js";
-import { createProject } from "../src/core/project.js";
+import { addZoomStop, createProject, withZoomMode } from "../src/core/project.js";
 import type { ExportArtifact } from "../src/core/types.js";
 
 function sampleProject() {
@@ -70,6 +70,19 @@ describe("buildSummaryMarkdown", () => {
     });
     expect(md).toContain("Transcript unavailable");
     expect(md).toContain("WHISPER_CPP_BIN");
+  });
+
+  it("names the zoom source so the summary matches what was rendered", () => {
+    const transcript = { available: false, segments: [], text: "" };
+    const auto = buildSummaryMarkdown({ project: sampleProject(), artifact, transcript });
+    expect(auto).toContain("- Zoom: cursor,");
+
+    const manual = buildSummaryMarkdown({
+      project: addZoomStop(withZoomMode(sampleProject(), "manual"), { id: "s1", t: 1000 }),
+      artifact,
+      transcript,
+    });
+    expect(manual).toContain("- Zoom: manual,");
   });
 
   it("lists callouts when present", () => {

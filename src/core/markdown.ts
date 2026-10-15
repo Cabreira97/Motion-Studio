@@ -60,7 +60,10 @@ export function buildSummaryMarkdown(options: SummaryOptions): string {
   lines.push(
     `- Crop: x=${project.crop.x.toFixed(3)}, y=${project.crop.y.toFixed(3)}, w=${project.crop.width.toFixed(3)}, h=${project.crop.height.toFixed(3)}`,
   );
-  lines.push(`- Auto zoom: ${project.zoom.enabled ? `${project.zoom.keyframes.length} keyframes` : "off"}`);
+  const zoomSource = project.zoom.mode === "manual" ? "manual" : "cursor";
+  lines.push(
+    `- Zoom: ${project.zoom.enabled ? `${zoomSource}, ${project.zoom.keyframes.length} keyframes` : "off"}`,
+  );
   lines.push(
     `- Cursor: ${project.cursorStyle.highlight ? "highlight on" : "highlight off"}${project.cursorStyle.zoomFollow ? ", follows cursor" : ""}`,
   );

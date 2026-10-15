@@ -1,6 +1,7 @@
 import { clamp } from "./time.js";
 import { MIN_CLIP_MS } from "./trim.js";
-import type { Callout, Point, Project, Rect, ZoomKeyframe } from "./types.js";
+import { MAX_ZOOM_SCALE, MIN_STOP_MS, MIN_ZOOM_SCALE } from "./zoom.js";
+import type { Callout, Point, Project, Rect, ZoomKeyframe, ZoomStop } from "./types.js";
 
 export interface ValidationResult {
   valid: boolean;
@@ -12,6 +13,7 @@ export const MAX_CALLOUT_LENGTH = 280;
 export const MAX_CURSOR_POINTS = 200_000;
 export const MAX_CALLOUTS = 200;
 export const MAX_KEYFRAMES = 5_000;
+export const MAX_ZOOM_STOPS = 500;
 
 const HEX_COLOR =
   /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})(@(0|1|0?\.[0-9]{1,3}))?$/;
@@ -83,6 +85,28 @@ export function validateKeyframes(keyframes: ZoomKeyframe[]): string[] {
   return errors;
 }
 
+export function validateZoomStops(stops: ZoomStop[]): string[] {
+  const errors: string[] = [];
+  if (!Array.isArray(stops)) return ["zoom.stops must be an array"];
+  if (stops.length > MAX_ZOOM_STOPS) errors.push(`zoom.stops exceeds ${MAX_ZOOM_STOPS} entries`);
+  const seen = new Set<string>();
+  for (let i = 0; i < stops.length; i += 1) {
+    const s = stops[i]!;
+    const label = `zoom.stops[${i}]`;
+    if (!s.id) errors.push(`${label}: id is required`);
+    else if (seen.has(s.id)) errors.push(`${label}: duplicate id "${s.id}"`);
+    else seen.add(s.id);
+    if (!Number.isFinite(s.t) || s.t < 0) errors.push(`${label}: invalid time`);
+    if (!Number.isFinite(s.durationMs) || s.durationMs < MIN_STOP_MS)
+      errors.push(`${label}: duration must be >= ${MIN_STOP_MS}ms`);
+    if (!Number.isFinite(s.scale) || s.scale < MIN_ZOOM_SCALE || s.scale > MAX_ZOOM_SCALE)
+      errors.push(`${label}: scale must be ${MIN_ZOOM_SCALE}..${MAX_ZOOM_SCALE}`);
+    if (!Number.isFinite(s.cx) || !Number.isFinite(s.cy))
+      errors.push(`${label}: invalid focus point`);
+  }
+  return errors;
+}
+
 /** Validates a full project before it is persisted or exported. */
 export function validateProject(project: Project): ValidationResult {
   const errors: string[] = [];
@@ -108,6 +132,7 @@ export function validateProject(project: Project): ValidationResult {
 
   errors.push(...validateCursorTrack(project.cursorTrack));
   errors.push(...validateKeyframes(project.zoom.keyframes));
+  errors.push(...validateZoomStops(project.zoom.stops ?? []));
   if (project.callouts.length > MAX_CALLOUTS) errors.push(`too many callouts (max ${MAX_CALLOUTS})`);
   project.callouts.forEach((c, i) => errors.push(...validateCallout(c, i)));
 
