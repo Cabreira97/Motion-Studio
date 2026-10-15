@@ -1,4 +1,5 @@
 import { formatDuration } from "../core/time.js";
+import { useI18n } from "../lib/i18n.js";
 
 /**
  * Always-visible recording timer. Rendered as a fixed banner while recording so
@@ -14,14 +15,15 @@ export function RecordingBanner({
   warning?: string | null;
   onStop: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="rec-banner" role="status" aria-live="polite">
       <span className="rec-banner__dot" aria-hidden="true" />
-      <span className="rec-banner__label">REC</span>
+      <span className="rec-banner__label">{t("rec.label")}</span>
       <span className="rec-banner__time">{formatDuration(elapsedMs)}</span>
       {warning && <span className="rec-banner__warning">{warning}</span>}
       <button type="button" className="btn btn--danger btn--sm" onClick={onStop}>
-        Stop
+        {t("rec.stop")}
       </button>
     </div>
   );

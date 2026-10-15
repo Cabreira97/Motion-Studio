@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useI18n } from "../lib/i18n.js";
 
 /** The four first-class UI states required everywhere. */
 
@@ -11,8 +12,7 @@ export function EmptyState({
   description: string;
   action?: ReactNode;
 }) {
-  return (
-    <div className="state state--empty" role="status">
+  return (    <div className="state state--empty" role="status">
       <div className="state__icon" aria-hidden="true">
         ○
       </div>
@@ -41,6 +41,7 @@ export function ErrorState({
   message: string;
   onRetry?: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="state state--error" role="alert">
       <div className="state__icon" aria-hidden="true">
@@ -50,7 +51,7 @@ export function ErrorState({
       <p className="state__text">{message}</p>
       {onRetry && (
         <button type="button" className="btn btn--ghost" onClick={onRetry}>
-          Try again
+          {t("common.retry")}
         </button>
       )}
     </div>

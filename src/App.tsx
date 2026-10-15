@@ -11,6 +11,7 @@ import {
 } from "./lib/bridge.js";
 import { ScreenRecorder, recorderSupported } from "./lib/recorder.js";
 import { loadProjects, persistProject, removeProject } from "./lib/projects.js";
+import { LANGUAGES, useI18n, type Lang, type TranslationKey } from "./lib/i18n.js";
 import { CalloutEditor } from "./components/CalloutEditor.js";
 import { SourcePicker } from "./components/SourcePicker.js";
 import { RecordingBanner, TimerText } from "./components/Timer.js";
@@ -44,6 +45,12 @@ import type {
 type View = "library" | "record" | "edit";
 type RecState = "idle" | "starting" | "recording" | "stopping";
 
+const KIND_KEY: Record<CaptureKind, TranslationKey> = {
+  screen: "kind.screen",
+  window: "kind.window",
+  region: "kind.region",
+};
+
 function errMessage(error: unknown): string {
   if (error instanceof BridgeUnavailableError) return error.message;
   if (error instanceof Error) return error.message;
@@ -61,6 +68,7 @@ function formatBytes(bytes: number): string {
 }
 
 export default function App() {
+  const { t, lang, setLang } = useI18n();
   const [boot, setBoot] = useState<"loading" | "ready" | "error">("loading");
   const [bootError, setBootError] = useState("");
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
@@ -190,7 +198,7 @@ export default function App() {
           path: sourcePath,
           width: sourceWidth,
           height: sourceHeight,
-          durationMs: Math.max(durationMs, 1),
+          durationMs,
           fps,
           hasAudio,
         },
@@ -198,13 +206,18 @@ export default function App() {
         presetId: "mp4-1080p",
       });
 
-      setProjects((prev) => [project, ...prev]);
-      await persistProject(project);
-      setActiveId(project.id);
+      const framed =
+        kind === "region"
+          ? withCrop(project, { x: 0.15, y: 0.15, width: 0.7, height: 0.7 })
+          : project;
+
+      await persistProject(framed);
+      setProjects((prev) => [framed, ...prev]);
+      setActiveId(framed.id);
+      setLastExport(null);
       setView("edit");
-      setRecWarning(
-        hasAudio || !mic ? null : "Microphone was requested but no audio track was captured.",
-      );
+
+      setRecWarning(hasAudio || !mic ? null : t("error.micWarning"));
     } catch (error) {
       setRecWarning(errMessage(error));
     } finally {
@@ -213,7 +226,7 @@ export default function App() {
       setElapsedMs(0);
       setRecState("idle");
     }
-  }, [kind, mic]);
+  }, [kind, mic, t]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -232,9 +245,7 @@ export default function App() {
     setRecWarning(null);
     try {
       if (!recorderSupported()) {
-        throw new Error(
-          "Screen capture is not available here. Use the desktop app (pnpm first-run) to record.",
-        );
+        throw new Error(t("error.captureUnsupported"));
       }
       setRecState("starting");
       const recorder = new ScreenRecorder();
@@ -251,7 +262,7 @@ export default function App() {
       setRecState("idle");
       setRecWarning(errMessage(error));
     }
-  }, [kind, mic]);
+  }, [kind, mic, t]);
 
   const commit = useCallback((next: Project) => {
     setProjects((prev) => prev.map((p) => (p.id === next.id ? next : p)));
@@ -264,9 +275,7 @@ export default function App() {
     setExportWarnings([]);
     setLastExport(null);
     if (!isTauri()) {
-      setExportError(
-        "Export runs through your local ffmpeg via the desktop app. Start it with `pnpm first-run`.",
-      );
+      setExportError(t("error.exportNeedsDesktop"));
       return;
     }
     setExporting(true);
@@ -294,9 +303,9 @@ export default function App() {
     } finally {
       setExporting(false);
     }
-  }, [activeProject, appInfo, commit]);
+  }, [activeProject, appInfo, commit, t]);
 
-  if (boot === "loading") return <LoadingState label="Loading your library…" />;
+  if (boot === "loading") return <LoadingState label={t("boot.loading")} />;
   if (boot === "error") return <ErrorState message={bootError} onRetry={() => location.reload()} />;
 
   return (
@@ -313,25 +322,35 @@ export default function App() {
             className={`nav__link ${view === "library" ? "nav__link--active" : ""}`}
             onClick={() => setView("library")}
           >
-            Library
+            {t("nav.library")}
           </button>
           <button
             type="button"
             className={`nav__link ${view === "record" ? "nav__link--active" : ""}`}
             onClick={() => setView("record")}
           >
-            New recording
+            {t("nav.new")}
           </button>
         </nav>
         <div className="topbar__meta">
           {recState === "recording" && <TimerText elapsedMs={elapsedMs} />}
+          <label className="lang" title={t("lang.label")}>
+            <span className="muted">{t("lang.label")}</span>
+            <select value={lang} onChange={(e) => setLang(e.target.value as Lang)}>
+              {LANGUAGES.map((item) => (
+                <option key={item.code} value={item.code}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
           {appInfo?.ffmpegPath ? (
             <span className="pill pill--ok" title={appInfo.ffmpegPath}>
-              ffmpeg ready
+              {t("status.ffmpegReady")}
             </span>
           ) : (
-            <span className="pill pill--warn" title="ffmpeg not found">
-              ffmpeg missing
+            <span className="pill pill--warn" title={t("status.ffmpegMissingTitle")}>
+              {t("status.ffmpegMissing")}
             </span>
           )}
         </div>
@@ -342,10 +361,7 @@ export default function App() {
       )}
 
       {!isTauri() && (
-        <div className="notice">
-          Browser preview mode — recording UI works, but saving and exporting need the desktop app
-          (`pnpm first-run`).
-        </div>
+        <div className="notice">{t("browser.notice")}</div>
       )}
 
       <main className="content">
@@ -382,11 +398,8 @@ export default function App() {
 
         {view === "record" && (
           <section className="panel">
-            <h2>New recording</h2>
-            <p className="muted">
-              Pick a source, optionally enable the microphone, then start. A timer stays visible
-              while recording; the OS picker chooses the exact screen or window.
-            </p>
+            <h2>{t("record.title")}</h2>
+            <p className="muted">{t("record.desc")}</p>
             <SourcePicker
               kind={kind}
               mic={mic}
@@ -397,14 +410,14 @@ export default function App() {
             />
             {recWarning && recState === "idle" && <p className="error-text">{recWarning}</p>}
             <div className="row">
-              <button
-                type="button"
-                className="btn btn--primary"
-                disabled={recState !== "idle"}
-                onClick={() => void startRecording()}
-              >
-                {recState === "starting" ? "Starting…" : "Start recording"}
-              </button>
+            <button
+              type="button"
+              className="btn btn--primary"
+              disabled={recState !== "idle"}
+              onClick={() => void startRecording()}
+            >
+              {recState === "starting" ? t("record.starting") : t("record.start")}
+            </button>
               {recState === "recording" && (
                 <button type="button" className="btn btn--danger" onClick={() => void handleStop()}>
                   Stop
@@ -433,11 +446,11 @@ export default function App() {
 
         {view === "edit" && !activeProject && (
           <EmptyState
-            title="No recording selected"
-            description="Pick a recording from the library to edit and export."
+            title={t("edit.noSelectionTitle")}
+            description={t("edit.noSelectionDesc")}
             action={
               <button type="button" className="btn btn--primary" onClick={() => setView("library")}>
-                Back to library
+                {t("edit.backToLibrary")}
               </button>
             }
           />
@@ -462,14 +475,15 @@ function LibraryView({
   onDelete: (id: string) => void;
   onNew: () => void;
 }) {
+  const { t } = useI18n();
   if (projects.length === 0) {
     return (
       <EmptyState
-        title="No recordings yet"
-        description="Record your screen, and it will appear here for editing and export."
+        title={t("library.emptyTitle")}
+        description={t("library.emptyDesc")}
         action={
           <button type="button" className="btn btn--primary" onClick={onNew}>
-            New recording
+            {t("nav.new")}
           </button>
         }
       />
@@ -479,9 +493,9 @@ function LibraryView({
   return (
     <section className="library">
       <div className="row row--between">
-        <h2>Your recordings</h2>
+        <h2>{t("library.title")}</h2>
         <button type="button" className="btn btn--primary" onClick={onNew}>
-          New recording
+          {t("nav.new")}
         </button>
       </div>
       <div className="grid">
@@ -490,22 +504,26 @@ function LibraryView({
             <h3 className="card__title">{project.name}</h3>
             <p className="muted">
               {formatDuration(project.source?.durationMs ?? 0)} ·{" "}
-              {project.source ? `${project.source.width}×${project.source.height}` : "unknown size"}
+              {project.source
+                ? `${project.source.width}×${project.source.height}`
+                : t("library.unknownSize")}
             </p>
             <p className="muted">
-              {project.exports.length} export{project.exports.length === 1 ? "" : "s"} ·{" "}
-              {project.capture.kind}
+              {t("library.meta", {
+                count: project.exports.length,
+                kind: t(KIND_KEY[project.capture.kind]),
+              })}
             </p>
             <div className="row">
               <button type="button" className="btn btn--primary btn--sm" onClick={() => onOpen(project.id)}>
-                Open
+                {t("library.open")}
               </button>
               <button
                 type="button"
                 className="btn btn--ghost btn--sm"
                 onClick={() => onDelete(project.id)}
               >
-                Delete
+                {t("library.delete")}
               </button>
             </div>
           </article>
@@ -546,6 +564,7 @@ function EditView({
   onReveal: (path: string) => void;
   onCopy: (path: string) => void;
 }) {
+  const { t } = useI18n();
   const durationMs = project.source?.durationMs ?? 0;
   const clipMs = Math.max(0, project.trim.endMs - project.trim.startMs);
 
@@ -560,7 +579,7 @@ function EditView({
     <section className="edit">
       <div className="row row--between">
         <button type="button" className="btn btn--ghost btn--sm" onClick={onBack}>
-          ← Library
+          ← {t("edit.back")}
         </button>
         <input
           className="input input--title"
@@ -582,9 +601,7 @@ function EditView({
             {previewUrl ? (
               <video className="stage__video" src={previewUrl} controls preload="metadata" />
             ) : (
-              <div className="stage__placeholder">
-                Preview is available after recording in the desktop app.
-              </div>
+              <div className="stage__placeholder">{t("edit.previewPlaceholder")}</div>
             )}
             <div
               className="stage__crop"
@@ -598,17 +615,21 @@ function EditView({
             />
           </div>
           <p className="muted">
-            Trim: {summarizeTrim(project)} · Output {project.framing.outputWidth}×
-            {project.framing.outputHeight} @ {project.framing.fps}fps
+            {t("edit.summary", {
+              summary: summarizeTrim(project),
+              width: project.framing.outputWidth,
+              height: project.framing.outputHeight,
+              fps: project.framing.fps,
+            })}
           </p>
         </div>
 
         <aside className="edit__controls">
           {/* Trim */}
           <div className="control">
-            <h4>Trim</h4>
+            <h4>{t("edit.trim")}</h4>
             <label>
-              <span>Start {formatDuration(project.trim.startMs)}</span>
+              <span>{t("edit.trimStart", { time: formatDuration(project.trim.startMs) })}</span>
               <input
                 type="range"
                 min={0}
@@ -623,7 +644,7 @@ function EditView({
               />
             </label>
             <label>
-              <span>End {formatDuration(project.trim.endMs)}</span>
+              <span>{t("edit.trimEnd", { time: formatDuration(project.trim.endMs) })}</span>
               <input
                 type="range"
                 min={0}
@@ -637,12 +658,12 @@ function EditView({
                 }
               />
             </label>
-            <p className="muted">Clip length {formatDuration(clipMs)}</p>
+            <p className="muted">{t("edit.clipLength", { time: formatDuration(clipMs) })}</p>
           </div>
 
           {/* Zoom */}
           <div className="control">
-            <h4>Auto zoom</h4>
+            <h4>{t("edit.zoom")}</h4>
             <label className="toggle">
               <input
                 type="checkbox"
@@ -651,10 +672,10 @@ function EditView({
                   onChange(withAutoZoom({ ...project, zoom: { ...project.zoom, enabled: e.target.checked } }))
                 }
               />
-              <span>Follow the cursor with smooth zooms</span>
+              <span>{t("edit.zoomFollow")}</span>
             </label>
             <label>
-              <span>Intensity {Math.round(project.zoom.intensity * 100)}%</span>
+              <span>{t("edit.zoomIntensity", { percent: Math.round(project.zoom.intensity * 100) })}</span>
               <input
                 type="range"
                 min={0.1}
@@ -676,18 +697,18 @@ function EditView({
                   })
                 }
               />
-              <span>Highlight the pointer</span>
+              <span>{t("edit.zoomHighlight")}</span>
             </label>
-            <p className="muted">{project.zoom.keyframes.length} zoom keyframes</p>
+            <p className="muted">{t("edit.zoomKeyframes", { count: project.zoom.keyframes.length })}</p>
           </div>
 
           {/* Crop */}
           <div className="control">
-            <h4>Crop</h4>
+            <h4>{t("edit.crop")}</h4>
             {(["x", "y", "width", "height"] as const).map((field) => (
               <label key={field}>
                 <span>
-                  {field} {Math.round(project.crop[field] * 100)}%
+                  {t("edit.cropField", { field, percent: Math.round(project.crop[field] * 100) })}
                 </span>
                 <input
                   type="range"
@@ -706,15 +727,15 @@ function EditView({
               className="btn btn--ghost btn--sm"
               onClick={() => onChange(withCrop(project, { x: 0, y: 0, width: 1, height: 1 }))}
             >
-              Reset crop
+              {t("edit.resetCrop")}
             </button>
           </div>
 
           {/* Framing */}
           <div className="control">
-            <h4>Framing</h4>
+            <h4>{t("edit.framing")}</h4>
             <label>
-              <span>Padding {project.framing.paddingPx}px</span>
+              <span>{t("edit.padding", { px: project.framing.paddingPx })}</span>
               <input
                 type="range"
                 min={0}
@@ -725,7 +746,7 @@ function EditView({
               />
             </label>
             <label>
-              <span>Corner radius {project.framing.cornerRadiusPx}px</span>
+              <span>{t("edit.radius", { px: project.framing.cornerRadiusPx })}</span>
               <input
                 type="range"
                 min={0}
@@ -736,7 +757,7 @@ function EditView({
               />
             </label>
             <label className="callout__color">
-              <span>Background</span>
+              <span>{t("edit.background")}</span>
               <input
                 type="color"
                 value={project.framing.background.slice(0, 7)}
@@ -752,9 +773,9 @@ function EditView({
 
           {/* Export */}
           <div className="control">
-            <h4>Export</h4>
+            <h4>{t("edit.export")}</h4>
             <label>
-              <span>Format</span>
+              <span>{t("edit.preset")}</span>
               <select
                 className="input"
                 value={project.export.presetId}
@@ -773,11 +794,14 @@ function EditView({
               disabled={exporting}
               onClick={onExport}
             >
-              {exporting ? "Exporting…" : "Export video"}
+              {exporting ? `${t("edit.export")}…` : t("edit.exportVideo")}
             </button>
             {exporting && (
               <p className="muted">
-                Rendering {formatDuration(exportProgressMs)} of {formatDuration(clipMs)}…
+                {t("edit.exportProgress", {
+                  done: formatDuration(exportProgressMs),
+                  total: formatDuration(clipMs),
+                })}
               </p>
             )}
             {exportError && <p className="error-text">{exportError}</p>}
@@ -790,7 +814,7 @@ function EditView({
 
           {lastExport && (
             <SuccessState
-              title="Export complete"
+              title={t("edit.exportComplete")}
               description={`${formatBytes(lastExport.bytes)} · ${formatDuration(lastExport.durationMs)}`}
             >
               <ul className="artifact-list">
@@ -799,10 +823,10 @@ function EditView({
                     <span className="artifact-list__label">{item.label}</span>
                     <code title={item.path}>{item.path}</code>
                     <button type="button" className="btn btn--ghost btn--sm" onClick={() => onCopy(item.path)}>
-                      Copy
+                      {t("edit.copy")}
                     </button>
                     <button type="button" className="btn btn--ghost btn--sm" onClick={() => onReveal(item.path)}>
-                      Reveal
+                      {t("edit.reveal")}
                     </button>
                   </li>
                 ))}
@@ -812,7 +836,7 @@ function EditView({
 
           {project.exports.length > 0 && (
             <div className="control">
-              <h4>Previous exports</h4>
+              <h4>{t("edit.previousExports")}</h4>
               <ul className="artifact-list">
                 {project.exports.map((artifact) => (
                   <li key={artifact.id}>
@@ -823,7 +847,7 @@ function EditView({
                       className="btn btn--ghost btn--sm"
                       onClick={() => onReveal(artifact.videoPath)}
                     >
-                      Reveal
+                      {t("edit.reveal")}
                     </button>
                   </li>
                 ))}

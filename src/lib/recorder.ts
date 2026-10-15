@@ -68,8 +68,15 @@ export class ScreenRecorder {
     if (this.recorder) throw new Error("A recording is already in progress.");
 
     const fps = options.fps ?? 30;
+    // Hint the OS picker so "window" surfaces windows first; "screen"/"region"
+    // surface full monitors (region is a non-destructive crop applied on export).
+    const displaySurface = options.kind === "window" ? "window" : "monitor";
+    const video: MediaTrackConstraints & { displaySurface?: string } = {
+      frameRate: { ideal: fps, max: 60 },
+      displaySurface,
+    };
     this.displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: fps, max: 60 } },
+      video,
       audio: false,
     });
 

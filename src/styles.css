@@ -102,6 +102,23 @@ body {
   gap: 10px;
 }
 
+.lang {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.lang select {
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .timer {
   font-variant-numeric: tabular-nums;
   font-weight: 600;

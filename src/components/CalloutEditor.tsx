@@ -1,5 +1,6 @@
 import type { Callout } from "../core/types.js";
 import { formatDuration } from "../core/time.js";
+import { useI18n } from "../lib/i18n.js";
 
 const BLANK = {
   text: "",
@@ -24,6 +25,7 @@ export function CalloutEditor({
   durationMs: number;
   onChange: (callouts: Callout[]) => void;
 }) {
+  const { t } = useI18n();
   const update = (id: string, patch: Partial<Callout>) => {
     onChange(callouts.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   };
@@ -33,34 +35,32 @@ export function CalloutEditor({
   const add = () => {
     onChange([
       ...callouts,
-      { id: crypto.randomUUID(), t: 0, ...BLANK, text: "New callout" },
+      { id: crypto.randomUUID(), t: 0, ...BLANK, text: t("callouts.newText") },
     ]);
   };
 
   return (
     <div className="callouts">
       <div className="row row--between">
-        <h4>Callouts</h4>
+        <h4>{t("callouts.title")}</h4>
         <button type="button" className="btn btn--ghost btn--sm" onClick={add}>
-          + Add
+          + {t("callouts.add")}
         </button>
       </div>
 
-      {callouts.length === 0 && (
-        <p className="muted">No callouts. Add timed labels or captions to the video.</p>
-      )}
+      {callouts.length === 0 && <p className="muted">{t("callouts.empty")}</p>}
 
       {callouts.map((callout) => (
         <div key={callout.id} className="callout">
           <input
             className="input"
             value={callout.text}
-            placeholder="Callout text"
+            placeholder={t("callouts.placeholder")}
             onChange={(e) => update(callout.id, { text: e.target.value })}
           />
           <div className="callout__grid">
             <label>
-              <span>At {formatDuration(callout.t)}</span>
+              <span>{t("callouts.at", { time: formatDuration(callout.t) })}</span>
               <input
                 type="range"
                 min={0}
@@ -71,7 +71,7 @@ export function CalloutEditor({
               />
             </label>
             <label>
-              <span>Duration {formatDuration(callout.durationMs)}</span>
+              <span>{t("callouts.duration", { time: formatDuration(callout.durationMs) })}</span>
               <input
                 type="range"
                 min={200}
@@ -104,7 +104,7 @@ export function CalloutEditor({
               />
             </label>
             <label className="callout__color">
-              <span>Text</span>
+              <span>{t("callouts.text")}</span>
               <input
                 type="color"
                 value={callout.color.slice(0, 7)}
@@ -112,7 +112,7 @@ export function CalloutEditor({
               />
             </label>
             <label className="callout__color">
-              <span>Box</span>
+              <span>{t("callouts.box")}</span>
               <input
                 type="color"
                 value={callout.boxColor.slice(0, 7)}
@@ -125,7 +125,7 @@ export function CalloutEditor({
             className="btn btn--danger btn--sm"
             onClick={() => remove(callout.id)}
           >
-            Remove
+            {t("callouts.remove")}
           </button>
         </div>
       ))}
