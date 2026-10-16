@@ -64,6 +64,7 @@ const en = {
 
   "edit.back": "Library",
   "edit.previewPlaceholder": "Preview is available after recording in the desktop app.",
+  "edit.previewFailed": "The preview could not play this recording ({reason}).",
   "edit.summary": "Trim: {summary} · Output {width}×{height} @ {fps}fps",
   "edit.trim": "Trim",
   "edit.trimStart": "Start {time}",
@@ -180,6 +181,7 @@ const ptBR: Dict = {
 
   "edit.back": "Biblioteca",
   "edit.previewPlaceholder": "A pré-visualização fica disponível após gravar no aplicativo desktop.",
+  "edit.previewFailed": "A pré-visualização não conseguiu reproduzir esta gravação ({reason}).",
   "edit.summary": "Corte: {summary} · Saída {width}×{height} @ {fps}fps",
   "edit.trim": "Corte",
   "edit.trimStart": "Início {time}",
@@ -293,6 +295,7 @@ const es: Dict = {
   "edit.back": "Biblioteca",
   "edit.previewPlaceholder":
     "La vista previa está disponible después de grabar en la aplicación de escritorio.",
+  "edit.previewFailed": "La vista previa no pudo reproducir esta grabación ({reason}).",
   "edit.summary": "Recorte: {summary} · Salida {width}×{height} @ {fps}fps",
   "edit.trim": "Recorte",
   "edit.trimStart": "Inicio {time}",

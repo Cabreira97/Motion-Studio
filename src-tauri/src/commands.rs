@@ -25,6 +25,10 @@ pub struct AppState {
     /// no way to stop it.
     #[cfg(all(unix, not(target_os = "macos")))]
     pub native_capture: Mutex<Option<crate::native_capture::Session>>,
+    /// Serves recordings to the editor preview, which cannot read them through
+    /// the asset protocol here. `None` if the listener could not be bound.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub media_server: Option<crate::media_server::MediaServer>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -299,6 +303,28 @@ pub fn run_ffmpeg(app: AppHandle, args: Vec<String>) -> Result<ProcessOutput, St
 #[tauri::command]
 pub fn probe_media(path: String) -> Result<MediaInfo, String> {
     media::probe(&path)
+}
+
+/// The URL the preview should load for a local file, when this platform needs
+/// one that is not the asset protocol.
+///
+/// `None` means "use the asset protocol" — the answer on Windows and macOS,
+/// where it plays, and the fallback on Linux if the loopback server could not
+/// bind or the file is outside the directory it serves.
+#[tauri::command]
+pub fn media_url(state: State<'_, AppState>, path: String) -> Option<String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        state
+            .media_server
+            .as_ref()?
+            .url_for(std::path::Path::new(&path))
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = (state, path);
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

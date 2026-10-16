@@ -192,11 +192,18 @@ export async function listen<T>(
 }
 
 /**
- * Converts a local file path into a URL the webview can load. Falls back to the
- * path unchanged in the browser where there is no asset protocol.
+ * Converts a local file path into a URL the webview can play.
+ *
+ * The asset protocol is the usual answer and the one Windows and macOS use.
+ * WebKitGTK will not play media from it — a `<video>` on `asset://` fails with
+ * MEDIA_ERR_SRC_NOT_SUPPORTED even though the scheme handler answers — so on
+ * Linux the Rust side hands back a loopback HTTP URL instead. Falls back to the
+ * path unchanged in the browser, where there is no asset protocol at all.
  */
-export async function toAssetUrl(path: string): Promise<string> {
+export async function toMediaUrl(path: string): Promise<string> {
   if (!isTauri()) return path;
+  const served = await invoke<string | null>("media_url", { path });
+  if (served) return served;
   const { convertFileSrc } = await import("@tauri-apps/api/core");
   return convertFileSrc(path);
 }

@@ -5,7 +5,7 @@ import {
   createTauriPorts,
   isTauri,
   listen,
-  toAssetUrl,
+  toMediaUrl,
   type AppInfo,
   type CaptureCapabilities,
   type TickPayload,
@@ -196,7 +196,7 @@ export default function App() {
         durationMs = info.durationMs || durationMs;
         fps = info.fps || fps;
         hasAudio = info.hasAudio;
-        setPreviewUrl(await toAssetUrl(sourcePath));
+        setPreviewUrl(await toMediaUrl(sourcePath));
       } else if (result.blob) {
         sourcePath = URL.createObjectURL(result.blob);
         setPreviewUrl(sourcePath);
@@ -397,7 +397,7 @@ export default function App() {
               if (project?.source?.path) {
                 const sourcePath = project.source.path;
                 if (isTauri()) {
-                  void toAssetUrl(sourcePath).then(setPreviewUrl).catch(() => setPreviewUrl(null));
+                  void toMediaUrl(sourcePath).then(setPreviewUrl).catch(() => setPreviewUrl(null));
                 } else {
                   setPreviewUrl(sourcePath);
                 }
@@ -570,6 +570,23 @@ function LibraryView({
 // Edit
 // ---------------------------------------------------------------------------
 
+/**
+ * A human-readable reason for a `<video>` failure. The numeric code is kept
+ * because it is what makes a report actionable: 4 means the source itself was
+ * refused, 2 means it was reachable but the transfer broke.
+ */
+function describeMediaError(error: MediaError | null): string {
+  if (!error) return "unknown";
+  const names: Record<number, string> = {
+    1: "aborted",
+    2: "network",
+    3: "decode",
+    4: "source not supported",
+  };
+  const name = names[error.code] ?? "unknown";
+  return error.message ? `${name} ${error.code}: ${error.message}` : `${name} ${error.code}`;
+}
+
 function EditView({
   project,
   previewUrl,
@@ -605,6 +622,9 @@ function EditView({
   // clicking the frame gives the focus point.
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [playheadMs, setPlayheadMs] = useState(0);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  // A new source gets a clean slate; the element reports its own failure again.
+  useEffect(() => setPreviewError(null), [previewUrl]);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const stops = project.zoom.stops;
   const manualZoom = project.zoom.mode === "manual";
@@ -664,10 +684,17 @@ function EditView({
                 src={previewUrl}
                 controls
                 preload="metadata"
+                onLoadedMetadata={() => setPreviewError(null)}
+                onError={(e) => setPreviewError(describeMediaError(e.currentTarget.error))}
                 onTimeUpdate={(e) => setPlayheadMs(Math.round(e.currentTarget.currentTime * 1000))}
               />
             ) : (
               <div className="stage__placeholder">{t("edit.previewPlaceholder")}</div>
+            )}
+            {previewError && (
+              <div className="stage__placeholder stage__placeholder--error">
+                {t("edit.previewFailed", { reason: previewError })}
+              </div>
             )}
             {/* The zoom focus is normalized against the *cropped* frame, which
                 is exactly what this box outlines — so it doubles as the

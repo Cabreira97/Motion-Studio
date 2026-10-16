@@ -15,6 +15,8 @@ mod commands;
 mod filename;
 mod media;
 #[cfg(all(unix, not(target_os = "macos")))]
+mod media_server;
+#[cfg(all(unix, not(target_os = "macos")))]
 mod native_capture;
 mod session;
 mod store;
@@ -64,6 +66,18 @@ pub fn run() {
             let store = Store::open(&data_dir.join("motion-studio.sqlite"))
                 .map_err(std::io::Error::other)?;
 
+            // The preview cannot read recordings through the asset protocol on
+            // Linux; see src/media_server.rs. Losing the server costs the
+            // preview, not the app, so a failure here only warns.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let media_server = match media_server::MediaServer::start(recordings_dir.clone()) {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    log::warn!("preview media server did not start: {error}");
+                    None
+                }
+            };
+
             app.manage(AppState {
                 store: Mutex::new(store),
                 session: Session::new(),
@@ -71,6 +85,8 @@ pub fn run() {
                 recordings_dir,
                 #[cfg(all(unix, not(target_os = "macos")))]
                 native_capture: Mutex::new(None),
+                #[cfg(all(unix, not(target_os = "macos")))]
+                media_server,
             });
 
             session::build_tray(app.handle())?;
@@ -84,6 +100,7 @@ pub fn run() {
             commands::native_capture_stop,
             commands::run_ffmpeg,
             commands::probe_media,
+            commands::media_url,
             commands::resolve_recording_path,
             commands::save_recording,
             commands::write_text_file,
