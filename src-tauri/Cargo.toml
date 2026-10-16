@@ -45,6 +45,10 @@ core-foundation = "0.10"
 # machine — there we report cursor sampling as unavailable with a reason.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11-dl = "2.21"
+# Needed to answer WebKitGTK's capture permission prompt (see
+# src/webview_permissions.rs). Must resolve to the same version wry links
+# against, or `with_webview` hands back a different `WebView` type.
+webkit2gtk = "2.0"
 
 [profile.release]
 codegen-units = 1

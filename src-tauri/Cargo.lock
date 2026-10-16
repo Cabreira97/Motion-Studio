@@ -2290,6 +2290,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-log",
  "tauri-plugin-opener",
+ "webkit2gtk",
  "windows-sys 0.59.0",
  "x11-dl",
 ]

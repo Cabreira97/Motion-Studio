@@ -142,6 +142,18 @@ interface RustTranscript {
   text: string;
 }
 
+/**
+ * Payload of `recording://tick`, mirroring `TickPayload` in `session.rs`.
+ *
+ * Declared here rather than inline at the listener so there is one statement of
+ * the shape: `listen` takes the payload type on trust, so writing `number` for
+ * an object compiles cleanly and fails only at runtime, where it looks like a
+ * frozen clock rather than a type error.
+ */
+export interface TickPayload {
+  elapsedMs: number;
+}
+
 export async function listen<T>(
   event: string,
   handler: (payload: T) => void,

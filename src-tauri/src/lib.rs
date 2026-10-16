@@ -11,6 +11,8 @@ mod filename;
 mod media;
 mod session;
 mod store;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod webview_permissions;
 
 use std::sync::Mutex;
 
@@ -57,6 +59,12 @@ pub fn run() {
             });
 
             session::build_tray(app.handle())?;
+
+            // WebKitGTK denies capture unless the app answers its permission
+            // signal, so screen recording is dead on arrival on Linux without
+            // this. No-op elsewhere.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            webview_permissions::install(app.handle())?;
 
             Ok(())
         })

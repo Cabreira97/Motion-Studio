@@ -252,7 +252,8 @@ fn open_pointer() -> Result<Box<dyn PointerSource>, String> {
     if wayland_session() {
         return Err(
             "Wayland does not expose the global cursor position to applications, so auto-zoom \
-             cannot follow the cursor. Log into an X11/Xorg session to enable it."
+             cannot follow the cursor. Use manual zoom in the editor to place zoom moments \
+             yourself, or log into an X11/Xorg session to enable cursor following."
                 .to_string(),
         );
     }
