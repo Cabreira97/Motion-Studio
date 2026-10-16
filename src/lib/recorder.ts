@@ -5,6 +5,8 @@
  * crop applied later in the ffmpeg render step.
  */
 
+import { FrameBridge } from "./frame-bridge.js";
+
 export type CaptureKind = "screen" | "window" | "region";
 
 export interface StartOptions {
@@ -158,6 +160,20 @@ const CLUSTER_SCAN_BYTES = 64 * 1024;
  * "End of file". Looking for a cluster distinguishes "no frames" from "small
  * recording" without guessing at a size threshold.
  */
+/**
+ * Explains a well-formed recording that holds no picture, or `null` if it does.
+ *
+ * `canvas.captureStream(fps)` emits frames at its fixed rate whether or not
+ * anything was ever drawn onto the canvas, so a capture source that delivers
+ * nothing still produces a complete, playable file — of a blank canvas. Byte
+ * size and cluster presence both read as success there. The count of frames
+ * drawn from the source is the only reading that does not, so it decides.
+ */
+export function describeBlankRecording(drawnFrames: number, elapsedMs: number): string | null {
+  if (drawnFrames > 0) return null;
+  return `The capture source produced no picture in ${Math.round(elapsedMs)}ms — the share was approved and the track reported itself live, but not one frame arrived. Saving this would have produced a blank video.`;
+}
+
 export async function hasMediaClusters(blob: Blob): Promise<boolean> {
   const head = new Uint8Array(await blob.slice(0, CLUSTER_SCAN_BYTES).arrayBuffer());
   outer: for (let i = 0; i + CLUSTER_ID.length <= head.length; i += 1) {
@@ -189,6 +205,8 @@ export class ScreenRecorder {
   private hasAudio = false;
   private recorderError: string | null = null;
   private videoTrack: MediaStreamTrack | null = null;
+  private bridge: FrameBridge | null = null;
+  private drawnFrames = 0;
 
   get elapsedMs(): number {
     return this.startedAt === 0 ? 0 : performance.now() - this.startedAt;
@@ -247,6 +265,27 @@ export class ScreenRecorder {
       if (this.recorder && this.recorder.state !== "inactive") this.recorder.stop();
     });
 
+    // Record a canvas copy of the capture, not the capture track itself. See
+    // frame-bridge.ts: WebKitGTK's display track delivers no frame to its own
+    // encoder, while the same encoder records a canvas stream correctly.
+    const size = preferredCaptureSize();
+    try {
+      // Awaiting here is safe: the user gesture was already spent by
+      // `getDisplayMedia` above and nothing after this point needs one.
+      this.bridge = await FrameBridge.open(new MediaStream([videoTrack]), {
+        fps,
+        width: this.resultWidth || size.width,
+        height: this.resultHeight || size.height,
+      });
+      tracks[0] = this.bridge.videoTrack;
+    } catch (error) {
+      // The share is already approved at this point, so failing without
+      // releasing it would leave the OS screen-sharing indicator on with no
+      // recording behind it and no way to start a new one.
+      this.cleanup();
+      throw error;
+    }
+
     const stream = new MediaStream(tracks);
     const mimeType = pickMimeType(this.hasAudio);
     this.chunks = [];
@@ -279,6 +318,8 @@ export class ScreenRecorder {
   }
 
   private cleanup(): void {
+    this.bridge?.stop();
+    this.bridge = null;
     this.displayStream?.getTracks().forEach((t) => t.stop());
     this.micStream?.getTracks().forEach((t) => t.stop());
     this.displayStream = null;
@@ -294,8 +335,14 @@ export class ScreenRecorder {
       recorder.onstop = () => resolve();
     });
     // Read the size while the track is still running: by now it has delivered
-    // frames, so this is the first point the reported size can be trusted.
+    // frames, so this is the first point the reported size can be trusted. The
+    // canvas is the authority, since that is what was encoded.
     if (this.videoTrack) this.readDimensions(this.videoTrack);
+    if (this.bridge) {
+      this.resultWidth = this.bridge.width;
+      this.resultHeight = this.bridge.height;
+      this.drawnFrames = this.bridge.drawnFrames;
+    }
     if (recorder.state !== "inactive") recorder.stop();
     await finished;
 
@@ -308,14 +355,17 @@ export class ScreenRecorder {
       width: this.resultWidth,
       height: this.resultHeight,
     };
-    // Diagnose before cleanup, while the track state is still readable.
+    // Diagnose before cleanup, while the track state is still readable and
+    // `elapsedMs` still has a start time to measure from.
     const empty = blob.size === 0 || !(await hasMediaClusters(blob));
-    const diagnosis = empty ? this.diagnoseEmpty(mimeType) : "";
+    const diagnosis = empty
+      ? this.diagnoseEmpty(mimeType)
+      : describeBlankRecording(this.drawnFrames, this.elapsedMs);
     this.recorder = null;
     this.chunks = [];
     this.videoTrack = null;
     this.cleanup();
-    if (empty) throw new Error(diagnosis);
+    if (diagnosis) throw new Error(diagnosis);
     return result;
   }
 
@@ -341,19 +391,12 @@ export class ScreenRecorder {
     if (track?.muted) {
       return `The capture source delivered no frames (the track stayed muted) after ${Math.round(this.elapsedMs)}ms. The screen share was approved but never produced a picture.`;
     }
-
-    // An odd side has no I420 chroma plane, so the encoder never configures and
-    // the muxer is left holding a header. Worth naming: the number alone does
-    // not look like a cause.
-    if (this.resultWidth % 2 !== 0 || this.resultHeight % 2 !== 0) {
-      return `The capture source produced an odd frame size (${this.resultWidth}×${this.resultHeight}), which the encoder cannot represent, so nothing was encoded.`;
-    }
-
-    const size =
-      this.resultWidth > 0 && this.resultHeight > 0
-        ? `${this.resultWidth}×${this.resultHeight}`
-        : "unknown size";
-    return `The recording holds no frames — the encoder wrote a header and nothing else. Source: ${size}, track ${track?.readyState ?? "missing"}, format ${mimeType}, ${Math.round(this.elapsedMs)}ms.`;
+    // The frame counter is the one unambiguous reading available: it counts
+    // pictures that actually arrived from the capture source, so zero rules the
+    // encoder out entirely and anything above zero rules the source out.
+    const blank = describeBlankRecording(this.drawnFrames, this.elapsedMs);
+    if (blank) return blank;
+    return `${this.drawnFrames} frames were captured but none were encoded (format ${mimeType}, ${this.resultWidth}×${this.resultHeight}). The capture worked and the encoder dropped it.`;
   }
 
   /** Aborts without producing a result. */
@@ -361,6 +404,7 @@ export class ScreenRecorder {
     if (this.recorder && this.recorder.state !== "inactive") this.recorder.stop();
     this.recorder = null;
     this.chunks = [];
+    this.videoTrack = null;
     this.cleanup();
   }
 }

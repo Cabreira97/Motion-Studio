@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { evenSize } from "../src/lib/frame-bridge.js";
 import {
   buildDisplayConstraints,
+  describeBlankRecording,
   describeCaptureFailure,
   hasMediaClusters,
   pickMimeType,
@@ -68,6 +70,27 @@ afterEach(() => {
   Reflect.deleteProperty(globalThis, "MediaRecorder");
   Reflect.deleteProperty(globalThis, "screen");
   Reflect.deleteProperty(globalThis, "devicePixelRatio");
+});
+
+describe("evenSize", () => {
+  it("rounds both sides down to even", () => {
+    expect(evenSize(1365, 767)).toEqual({ width: 1364, height: 766 });
+  });
+
+  it("leaves an already even size alone", () => {
+    expect(evenSize(1920, 1080)).toEqual({ width: 1920, height: 1080 });
+  });
+
+  it("floors fractional sizes before rounding", () => {
+    expect(evenSize(1279.6, 719.2)).toEqual({ width: 1278, height: 718 });
+  });
+
+  it("never returns a zero side", () => {
+    // A zero-sized canvas produces a track that encodes nothing, which is the
+    // failure this whole file exists to avoid.
+    expect(evenSize(0, 0)).toEqual({ width: 2, height: 2 });
+    expect(evenSize(1, 1)).toEqual({ width: 2, height: 2 });
+  });
 });
 
 describe("preferredCaptureSize", () => {
@@ -162,6 +185,21 @@ describe("hasMediaClusters", () => {
 
   it("rejects an empty blob", async () => {
     expect(await hasMediaClusters(new Blob())).toBe(false);
+  });
+});
+
+describe("describeBlankRecording", () => {
+  it("rejects a well-formed file that no frame was ever drawn into", () => {
+    // The blank-canvas trap: `captureStream(fps)` emits frames on its own
+    // schedule, so a dead capture source still yields a playable file whose
+    // size and cluster check both read as success.
+    const message = describeBlankRecording(0, 7007);
+    expect(message).toContain("no picture in 7007ms");
+    expect(message).toContain("blank video");
+  });
+
+  it("passes a recording that drew at least one frame", () => {
+    expect(describeBlankRecording(1, 7007)).toBeNull();
   });
 });
 
