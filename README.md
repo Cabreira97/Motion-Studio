@@ -1,9 +1,10 @@
 # Motion Studio
 
-A personal, **local-first** screen recorder. Record your screen, and it
-auto-zooms on the cursor with smooth framing, lets you trim non-destructively,
-and exports shareable H.264/WebM videos — plus a poster frame, transcript and
-Markdown summary. Built with Tauri 2, React, TypeScript, ffmpeg and SQLite.
+A personal, **local-first** screen recorder. Record your screen, and it zooms
+with smooth framing — following the cursor automatically, or on zoom moments you
+place by hand — lets you trim non-destructively, and exports shareable
+H.264/WebM videos, plus a poster frame, transcript and Markdown summary. Built
+with Tauri 2, React, TypeScript, ffmpeg and SQLite.
 
 Everything runs on your machine. There are **no accounts, no billing, no
 telemetry, no analytics, and no hosted control plane**.
@@ -72,7 +73,8 @@ Tauri (Rust) platform layer (src-tauri)  ← OS integration
 - **UI**: React + TypeScript. Screen/window capture uses the browser
   `getDisplayMedia` (the OS shows its own picker) and `MediaRecorder`.
 - **`src/core`**: pure, dependency-free logic — trim math, cursor clustering,
-  auto-zoom keyframes, the ffmpeg filtergraph, presets, Markdown, validation.
+  zoom keyframes (cursor-driven and manual), the ffmpeg filtergraph, presets,
+  Markdown, validation.
   It is the single source of truth and is fully unit-tested.
 - **Pipeline**: `src/core/pipeline.ts` orchestrates the render, poster,
   transcript and summary. It runs identically against the Rust ports (in the
@@ -99,7 +101,20 @@ computed in TypeScript (`fitInside`) rather than by
 Cursor timestamps are **clip-relative**: `toClipTime` rebases the recorded track
 onto the trimmed timeline before the plan is built, because the overlay runs
 after `setpts=PTS-STARTPTS`. Zoom keyframes use the same convention, so the
-highlight and the auto-zoom stay in sync when the trim does not start at zero.
+highlight and the zoom stay in sync when the trim does not start at zero.
+
+Zoom keyframes come from one of two sources, selected per project:
+
+- **Cursor** — clusters the recorded cursor track into zoom moments.
+- **Manual** — hand-placed stops (`src/core/zoom.ts`). A stop is *when*, *how
+  far in*, *where*, and *for how long*; it expands into the same ease-in / hold
+  / ease-out keyframes a cursor cluster does, so there is a single render path.
+  Stops are stored in **source** time, like the trim, so they keep pointing at
+  the same frame when the trim moves; overlapping holds are resolved by
+  shortening the earlier stop.
+
+Both sources feed `withZoomTimeline`, which is re-run on every trim or zoom
+edit. Switching modes keeps both sources, so it is lossless.
 
 ---
 
@@ -174,10 +189,19 @@ Cursor sampling needs **X11**: `libX11` is loaded at runtime (`dlopen`), so no
 X11 headers are needed to build and the binary still starts without X11.
 
 **Wayland deliberately does not expose the global cursor position to
-applications**, so auto-zoom cannot follow the cursor there. The app detects
-this, reports it on the recording screen, and records normally — everything
-else (trim, crop, manual zoom, padding, rounded framing, callouts, export)
-works unchanged. Log into an X11/Xorg session if you want auto-zoom.
+applications**, so cursor-driven zoom has nothing to follow there. The app
+detects this, reports it on the recording screen, and records normally —
+everything else (trim, crop, padding, rounded framing, callouts, export) works
+unchanged.
+
+On Wayland, use **manual zoom** (Zoom → Manual in the editor): play to the
+moment you want, add a zoom, then click the preview to aim it. It produces the
+same keyframe timeline cursor zoom does, so the render path is identical. An
+X11/Xorg session is only needed if you want the zoom placed for you.
+
+> XWayland is not a workaround: `XQueryPointer` succeeds there but returns a
+> frozen position, which is worse than failing — the zoom would silently pin to
+> one wrong point for the whole video. The app refuses it on purpose.
 
 ---
 

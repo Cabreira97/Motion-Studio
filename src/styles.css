@@ -570,6 +570,66 @@ label span {
   pointer-events: none;
 }
 
+/* Focus point of the selected manual zoom, placed by clicking the crop box. */
+.stage__focus {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.seg {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.seg__btn {
+  flex: 1;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.seg__btn--on {
+  background: var(--accent);
+  color: #fff;
+}
+
+.seg__btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.stops {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stops__item {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.stops__item--on {
+  border-color: var(--accent);
+}
+
 .edit__controls {
   display: flex;
   flex-direction: column;

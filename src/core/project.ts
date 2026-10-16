@@ -4,6 +4,13 @@ import { formatDuration } from "./time.js";
 import { normalizeTrim } from "./trim.js";
 import { clampRect } from "./validation.js";
 import {
+  buildManualTimeline,
+  clampStop,
+  normalizeStops,
+  DEFAULT_STOP_MS,
+  DEFAULT_STOP_SCALE,
+} from "./zoom.js";
+import {
   DEFAULT_CURSOR_STYLE,
   DEFAULT_FRAMING,
   FULL_CROP,
@@ -12,6 +19,8 @@ import {
   type Framing,
   type Project,
   type SourceMedia,
+  type ZoomMode,
+  type ZoomStop,
 } from "./types.js";
 
 export interface CreateProjectInput {
@@ -75,7 +84,7 @@ export function createProject(input: CreateProjectInput): Project {
     },
     source: input.source,
     cursorTrack: input.cursorTrack ?? [],
-    zoom: { enabled: true, keyframes: [], intensity: 0.45 },
+    zoom: { enabled: true, mode: "auto", keyframes: [], stops: [], intensity: 0.45 },
     cursorStyle: { ...DEFAULT_CURSOR_STYLE },
     crop: { ...FULL_CROP },
     callouts: [],
@@ -85,21 +94,106 @@ export function createProject(input: CreateProjectInput): Project {
     exports: [],
   };
 
-  return withAutoZoom(project);
+  return withZoomTimeline(project);
 }
 
-/** Recomputes the zoom keyframes from the cursor track + current trim. */
-export function withAutoZoom(
+/**
+ * Recomputes the render-facing zoom keyframes from whichever source the
+ * project's mode selects: the recorded cursor track, or hand-placed stops.
+ *
+ * Call this after anything that moves the trim or edits a zoom source — the
+ * keyframes are clip-relative, so they go stale whenever the trim start moves.
+ */
+export function withZoomTimeline(
   project: Project,
   intensity = project.zoom.intensity,
 ): Project {
   if (!project.zoom.enabled) return { ...project, zoom: { ...project.zoom, intensity } };
   const durationMs = Math.max(0, project.trim.endMs - project.trim.startMs);
-  const keyframes = buildZoomTimeline(
-    toClipTime(project.cursorTrack, project.trim.startMs, durationMs),
-    { durationMs, intensity, smoothingMs: project.cursorStyle.smoothingMs },
+  const keyframes =
+    project.zoom.mode === "manual"
+      ? buildManualTimeline(project.zoom.stops, project.trim.startMs, {
+          durationMs,
+          smoothingMs: project.cursorStyle.smoothingMs,
+        })
+      : buildZoomTimeline(toClipTime(project.cursorTrack, project.trim.startMs, durationMs), {
+          durationMs,
+          intensity,
+          smoothingMs: project.cursorStyle.smoothingMs,
+        });
+  return { ...project, zoom: { ...project.zoom, keyframes, intensity } };
+}
+
+/** Switches between cursor-driven and hand-placed zoom, keeping both sources. */
+export function withZoomMode(project: Project, mode: ZoomMode): Project {
+  return withZoomTimeline(touch({ ...project, zoom: { ...project.zoom, mode } }));
+}
+
+/** Replaces the manual stop list and rebuilds the timeline. */
+export function withZoomStops(project: Project, stops: ZoomStop[]): Project {
+  return withZoomTimeline(
+    touch({ ...project, zoom: { ...project.zoom, stops: normalizeStops(stops) } }),
   );
-  return { ...project, zoom: { keyframes, enabled: project.zoom.enabled, intensity } };
+}
+
+/** Adds a stop at `t` (source time) focused on a normalized point. */
+export function addZoomStop(
+  project: Project,
+  stop: { id: string; t: number; scale?: number; cx?: number; cy?: number; durationMs?: number },
+): Project {
+  return withZoomStops(project, [
+    ...project.zoom.stops,
+    {
+      id: stop.id,
+      t: stop.t,
+      durationMs: stop.durationMs ?? DEFAULT_STOP_MS,
+      scale: stop.scale ?? DEFAULT_STOP_SCALE,
+      cx: stop.cx ?? 0.5,
+      cy: stop.cy ?? 0.5,
+    },
+  ]);
+}
+
+export function removeZoomStop(project: Project, id: string): Project {
+  return withZoomStops(
+    project,
+    project.zoom.stops.filter((s) => s.id !== id),
+  );
+}
+
+export function updateZoomStop(
+  project: Project,
+  id: string,
+  patch: Partial<Omit<ZoomStop, "id">>,
+): Project {
+  return withZoomStops(
+    project,
+    project.zoom.stops.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+  );
+}
+
+/**
+ * Fills in fields added after a project was saved.
+ *
+ * Projects are persisted as opaque JSON, so an older document simply lacks the
+ * newer keys. Reading one must not crash the library view or silently produce
+ * `undefined.length` further down.
+ */
+export function migrateProject(project: Project): Project {
+  const zoom = project.zoom ?? { enabled: true, keyframes: [], intensity: 0.45 };
+  return {
+    ...project,
+    cursorTrack: Array.isArray(project.cursorTrack) ? project.cursorTrack : [],
+    callouts: Array.isArray(project.callouts) ? project.callouts : [],
+    exports: Array.isArray(project.exports) ? project.exports : [],
+    zoom: {
+      enabled: zoom.enabled ?? true,
+      mode: zoom.mode === "manual" ? "manual" : "auto",
+      keyframes: Array.isArray(zoom.keyframes) ? zoom.keyframes : [],
+      stops: Array.isArray(zoom.stops) ? zoom.stops.map(clampStop) : [],
+      intensity: Number.isFinite(zoom.intensity) ? zoom.intensity : 0.45,
+    },
+  };
 }
 
 export function touch(project: Project, now = Date.now()): Project {
@@ -118,7 +212,7 @@ export function withTrim(project: Project, trim: Project["trim"]): Project {
     ...project,
     trim: { startMs: normalized.startMs, endMs: normalized.endMs },
   });
-  return withAutoZoom(next);
+  return withZoomTimeline(next);
 }
 
 export function withPreset(project: Project, presetId: string): Project {

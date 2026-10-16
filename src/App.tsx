@@ -25,15 +25,20 @@ import { EXPORT_PRESETS } from "./core/presets.js";
 import { exportArtifacts, runExport } from "./core/pipeline.js";
 import {
   addExport,
+  addZoomStop,
   createProject,
+  removeZoomStop,
   summarizeTrim,
   timestampName,
+  updateZoomStop,
   withCrop,
   withPreset,
   withTrim,
-  withAutoZoom,
+  withZoomMode,
+  withZoomTimeline,
 } from "./core/project.js";
 import { formatDuration } from "./core/time.js";
+import { MAX_ZOOM_SCALE, MIN_STOP_MS, MIN_ZOOM_SCALE } from "./core/zoom.js";
 import type {
   Callout,
   CaptureKind,
@@ -580,6 +585,32 @@ function EditView({
   const durationMs = project.source?.durationMs ?? 0;
   const clipMs = Math.max(0, project.trim.endMs - project.trim.startMs);
 
+  // Manual zoom is authored against the preview: the playhead gives the time,
+  // clicking the frame gives the focus point.
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [playheadMs, setPlayheadMs] = useState(0);
+  const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
+  const stops = project.zoom.stops;
+  const manualZoom = project.zoom.mode === "manual";
+  const selectedStop = stops.find((s) => s.id === selectedStopId) ?? null;
+  const pickingFocus = manualZoom && selectedStop !== null;
+
+  const addStopAtPlayhead = () => {
+    const id = `zs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    setSelectedStopId(id);
+    onChange(addZoomStop(project, { id, t: playheadMs }));
+  };
+
+  /** Click-to-focus: maps a click on the stage to a 0..1 point on the frame. */
+  const focusFromClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (project.zoom.mode !== "manual" || !selectedStop) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const cx = (event.clientX - rect.left) / rect.width;
+    const cy = (event.clientY - rect.top) / rect.height;
+    onChange(updateZoomStop(project, selectedStop.id, { cx, cy }));
+  };
+
   const setFraming = (patch: Partial<Framing>) =>
     onChange({ ...project, framing: { ...project.framing, ...patch } });
 
@@ -611,20 +642,39 @@ function EditView({
             }}
           >
             {previewUrl ? (
-              <video className="stage__video" src={previewUrl} controls preload="metadata" />
+              <video
+                ref={videoRef}
+                className="stage__video"
+                src={previewUrl}
+                controls
+                preload="metadata"
+                onTimeUpdate={(e) => setPlayheadMs(Math.round(e.currentTarget.currentTime * 1000))}
+              />
             ) : (
               <div className="stage__placeholder">{t("edit.previewPlaceholder")}</div>
             )}
+            {/* The zoom focus is normalized against the *cropped* frame, which
+                is exactly what this box outlines — so it doubles as the
+                click target for picking a focus point. */}
             <div
               className="stage__crop"
+              onClick={focusFromClick}
               style={{
                 left: `${project.crop.x * 100}%`,
                 top: `${project.crop.y * 100}%`,
                 width: `${project.crop.width * 100}%`,
                 height: `${project.crop.height * 100}%`,
                 borderRadius: project.framing.cornerRadiusPx,
+                ...(pickingFocus ? { pointerEvents: "auto" as const, cursor: "crosshair" } : {}),
               }}
-            />
+            >
+              {pickingFocus && (
+                <span
+                  className="stage__focus"
+                  style={{ left: `${selectedStop.cx * 100}%`, top: `${selectedStop.cy * 100}%` }}
+                />
+              )}
+            </div>
           </div>
           <p className="muted">
             {t("edit.summary", {
@@ -681,23 +731,129 @@ function EditView({
                 type="checkbox"
                 checked={project.zoom.enabled}
                 onChange={(e) =>
-                  onChange(withAutoZoom({ ...project, zoom: { ...project.zoom, enabled: e.target.checked } }))
+                  onChange(
+                    withZoomTimeline({
+                      ...project,
+                      zoom: { ...project.zoom, enabled: e.target.checked },
+                    }),
+                  )
                 }
               />
-              <span>{t("edit.zoomFollow")}</span>
+              <span>{t("edit.zoomEnabled")}</span>
             </label>
-            <label>
-              <span>{t("edit.zoomIntensity", { percent: Math.round(project.zoom.intensity * 100) })}</span>
-              <input
-                type="range"
-                min={0.1}
-                max={1}
-                step={0.05}
-                value={project.zoom.intensity}
-                disabled={!project.zoom.enabled}
-                onChange={(e) => onChange(withAutoZoom(project, Number(e.target.value)))}
-              />
-            </label>
+
+            <div className="seg" role="group" aria-label={t("edit.zoomMode")}>
+              {(["auto", "manual"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={`seg__btn${project.zoom.mode === mode ? " seg__btn--on" : ""}`}
+                  disabled={!project.zoom.enabled}
+                  onClick={() => onChange(withZoomMode(project, mode))}
+                >
+                  {t(mode === "auto" ? "edit.zoomModeAuto" : "edit.zoomModeManual")}
+                </button>
+              ))}
+            </div>
+
+            {manualZoom ? (
+              <>
+                <p className="muted">{t("edit.zoomManualHint")}</p>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  disabled={!project.zoom.enabled}
+                  onClick={addStopAtPlayhead}
+                >
+                  {t("edit.zoomAddStop", { time: formatDuration(playheadMs) })}
+                </button>
+
+                {stops.length === 0 ? (
+                  <p className="muted">{t("edit.zoomNoStops")}</p>
+                ) : (
+                  <ul className="stops">
+                    {stops.map((stop) => (
+                      <li
+                        key={stop.id}
+                        className={`stops__item${stop.id === selectedStopId ? " stops__item--on" : ""}`}
+                      >
+                        <div className="row row--between">
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() => setSelectedStopId(stop.id)}
+                          >
+                            {t("edit.zoomStopLabel", {
+                              time: formatDuration(stop.t),
+                              scale: stop.scale.toFixed(1),
+                            })}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() => {
+                              if (stop.id === selectedStopId) setSelectedStopId(null);
+                              onChange(removeZoomStop(project, stop.id));
+                            }}
+                          >
+                            {t("edit.zoomRemoveStop")}
+                          </button>
+                        </div>
+                        <label>
+                          <span>{t("edit.zoomStopScale", { scale: stop.scale.toFixed(2) })}</span>
+                          <input
+                            type="range"
+                            min={MIN_ZOOM_SCALE}
+                            max={MAX_ZOOM_SCALE}
+                            step={0.05}
+                            value={stop.scale}
+                            onChange={(e) =>
+                              onChange(
+                                updateZoomStop(project, stop.id, { scale: Number(e.target.value) }),
+                              )
+                            }
+                          />
+                        </label>
+                        <label>
+                          <span>
+                            {t("edit.zoomStopDuration", { time: formatDuration(stop.durationMs) })}
+                          </span>
+                          <input
+                            type="range"
+                            min={MIN_STOP_MS}
+                            max={Math.max(MIN_STOP_MS, clipMs)}
+                            step={100}
+                            value={stop.durationMs}
+                            onChange={(e) =>
+                              onChange(
+                                updateZoomStop(project, stop.id, {
+                                  durationMs: Number(e.target.value),
+                                }),
+                              )
+                            }
+                          />
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            ) : (
+              <label>
+                <span>
+                  {t("edit.zoomIntensity", { percent: Math.round(project.zoom.intensity * 100) })}
+                </span>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  value={project.zoom.intensity}
+                  disabled={!project.zoom.enabled}
+                  onChange={(e) => onChange(withZoomTimeline(project, Number(e.target.value)))}
+                />
+              </label>
+            )}
             <label className="toggle">
               <input
                 type="checkbox"
@@ -712,6 +868,12 @@ function EditView({
               <span>{t("edit.zoomHighlight")}</span>
             </label>
             <p className="muted">{t("edit.zoomKeyframes", { count: project.zoom.keyframes.length })}</p>
+            {/* Auto-zoom silently produces nothing without a cursor track —
+                most often on Wayland, which does not report the global cursor
+                position. Say so, and point at the mode that does work. */}
+            {project.zoom.enabled && !manualZoom && project.cursorTrack.length === 0 && (
+              <p className="warn-text">{t("edit.zoomNoCursorTrack")}</p>
+            )}
           </div>
 
           {/* Crop */}
