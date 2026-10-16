@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { evenSize } from "../src/lib/frame-bridge.js";
+import type { BlankCheck } from "../src/lib/recorder.js";
 import {
   buildDisplayConstraints,
   describeBlankRecording,
@@ -189,21 +190,49 @@ describe("hasMediaClusters", () => {
 });
 
 describe("describeBlankRecording", () => {
+  function check(over: Partial<BlankCheck> = {}): BlankCheck {
+    return {
+      drawnFrames: 148,
+      elapsedMs: 7007,
+      sampledFrames: 5,
+      litFrames: 5,
+      scheduler: "requestVideoFrameCallback",
+      ...over,
+    };
+  }
+
   it("rejects a well-formed file that no frame was ever drawn into", () => {
     // The blank-canvas trap: `captureStream(fps)` emits frames on its own
     // schedule, so a dead capture source still yields a playable file whose
     // size and cluster check both read as success.
-    const message = describeBlankRecording(0, 7007);
+    const message = describeBlankRecording(check({ drawnFrames: 0, sampledFrames: 0, litFrames: 0 }));
     expect(message).toContain("no picture in 7007ms");
     expect(message).toContain("blank video");
   });
 
-  it("passes a recording that drew at least one frame", () => {
-    expect(describeBlankRecording(1, 7007)).toBeNull();
+  it("rejects frames that arrived and were all black", () => {
+    // WebKitGTK's GL video sink plays a stream whose frames read back black,
+    // so the draw counter climbs and the encoder is fed a black picture. This
+    // is the only reading that separates that from a working capture.
+    const message = describeBlankRecording(check({ litFrames: 0 }));
+    expect(message).toContain("All 148 captured frames were black");
+    expect(message).toContain("WEBKIT_GST_DISABLE_GL_SINK=1");
+  });
+
+  it("passes a recording whose frames held a picture", () => {
+    expect(describeBlankRecording(check())).toBeNull();
+  });
+
+  it("passes when readback never succeeded, having no evidence either way", () => {
+    // A refused readback must not be read as proof of a black recording.
+    expect(describeBlankRecording(check({ sampledFrames: 0, litFrames: 0 }))).toBeNull();
   });
 
   it("names the draw scheduler, which rules the draw loop in or out", () => {
-    expect(describeBlankRecording(0, 7007, "interval")).toContain("draw scheduler: interval");
+    const message = describeBlankRecording(
+      check({ drawnFrames: 0, sampledFrames: 0, litFrames: 0, scheduler: "interval" }),
+    );
+    expect(message).toContain("draw scheduler: interval");
   });
 });
 

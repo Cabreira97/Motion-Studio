@@ -159,16 +159,32 @@ const CLUSTER_SCAN_BYTES = 64 * 1024;
  * size and cluster presence both read as success there. The count of frames
  * drawn from the source is the only reading that does not, so it decides.
  */
-export function describeBlankRecording(
-  drawnFrames: number,
-  elapsedMs: number,
-  scheduler = "",
-): string | null {
-  if (drawnFrames > 0) return null;
+export interface BlankCheck {
+  drawnFrames: number;
+  elapsedMs: number;
+  /** Frames whose pixels were read back; `0` means readback never succeeded. */
+  sampledFrames: number;
+  /** Of those, how many held any picture. */
+  litFrames: number;
+  scheduler: string;
+}
+
+export function describeBlankRecording(check: BlankCheck): string | null {
+  const { drawnFrames, elapsedMs, sampledFrames, litFrames, scheduler } = check;
   // Name the scheduler: both of them having drawn nothing rules out the draw
   // loop itself, which is the next thing anyone reading this would suspect.
   const how = scheduler ? ` (draw scheduler: ${scheduler})` : "";
-  return `The capture source produced no picture in ${Math.round(elapsedMs)}ms${how} — the share was approved and the track reported itself live, but not one frame arrived. Saving this would have produced a blank video.`;
+  if (drawnFrames === 0) {
+    return `The capture source produced no picture in ${Math.round(elapsedMs)}ms${how} — the share was approved and the track reported itself live, but not one frame arrived. Saving this would have produced a blank video.`;
+  }
+  // Frames arrived and every one of them was black. On Linux this is
+  // WebKitGTK's GL video sink handing out GPU-side frames that read back as
+  // black; `WEBKIT_GST_DISABLE_GL_SINK=1` is what turns that off, and the app
+  // sets it at startup — so reaching here means it did not take effect.
+  if (sampledFrames > 0 && litFrames === 0) {
+    return `All ${drawnFrames} captured frames were black (${sampledFrames} checked, none with any picture). The capture and the encoder both worked; the frames themselves carried no image. On Linux this is the webview's GL video sink — try starting the app with WEBKIT_GST_DISABLE_GL_SINK=1.`;
+  }
+  return null;
 }
 
 /**
@@ -214,6 +230,8 @@ export class ScreenRecorder {
   private bridge: FrameBridge | null = null;
   private drawnFrames = 0;
   private scheduler = "";
+  private litFrames = 0;
+  private sampledFrames = 0;
 
   get elapsedMs(): number {
     return this.startedAt === 0 ? 0 : performance.now() - this.startedAt;
@@ -324,6 +342,16 @@ export class ScreenRecorder {
     if (settings.height) this.resultHeight = settings.height;
   }
 
+  private blankCheck(): BlankCheck {
+    return {
+      drawnFrames: this.drawnFrames,
+      elapsedMs: this.elapsedMs,
+      sampledFrames: this.sampledFrames,
+      litFrames: this.litFrames,
+      scheduler: this.scheduler,
+    };
+  }
+
   private cleanup(): void {
     this.bridge?.stop();
     this.bridge = null;
@@ -350,6 +378,8 @@ export class ScreenRecorder {
       this.resultHeight = this.bridge.height;
       this.drawnFrames = this.bridge.drawnFrames;
       this.scheduler = this.bridge.schedulerName;
+      this.litFrames = this.bridge.litFrames;
+      this.sampledFrames = this.bridge.sampledFrames;
     }
     if (recorder.state !== "inactive") recorder.stop();
     await finished;
@@ -368,7 +398,7 @@ export class ScreenRecorder {
     const empty = blob.size === 0 || !(await hasMediaClusters(blob));
     const diagnosis = empty
       ? this.diagnoseEmpty(mimeType)
-      : describeBlankRecording(this.drawnFrames, this.elapsedMs, this.scheduler);
+      : describeBlankRecording(this.blankCheck());
     this.recorder = null;
     this.chunks = [];
     this.videoTrack = null;
@@ -402,7 +432,7 @@ export class ScreenRecorder {
     // The frame counter is the one unambiguous reading available: it counts
     // pictures that actually arrived from the capture source, so zero rules the
     // encoder out entirely and anything above zero rules the source out.
-    const blank = describeBlankRecording(this.drawnFrames, this.elapsedMs, this.scheduler);
+    const blank = describeBlankRecording(this.blankCheck());
     if (blank) return blank;
     return `${this.drawnFrames} frames were captured but none were encoded (format ${mimeType}, ${this.resultWidth}×${this.resultHeight}). The capture worked and the encoder dropped it.`;
   }

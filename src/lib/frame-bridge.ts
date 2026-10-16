@@ -38,6 +38,23 @@ export function evenSize(width: number, height: number): { width: number; height
 /** How long to wait for a per-frame callback before polling instead. */
 const SCHEDULER_WATCHDOG_MS = 1000;
 
+/**
+ * Size the canvas is downscaled to before its pixels are read back.
+ *
+ * Reading a 1920x1080 canvas costs 8MB per check. Letting `drawImage` downscale
+ * first costs a few hundred bytes and loses nothing that matters here: the
+ * question is whether any picture arrived at all, and averaging only makes a
+ * mostly-dark frame with some bright content easier to see, not harder.
+ */
+const SAMPLE_WIDTH = 32;
+const SAMPLE_HEIGHT = 18;
+
+/** Draws between pixel checks — roughly one a second at 30fps. */
+const SAMPLE_EVERY = 30;
+
+/** Channel value above which a sample counts as lit, not black. */
+const BLACK_THRESHOLD = 8;
+
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: () => void) => number;
   cancelVideoFrameCallback?: (handle: number) => void;
@@ -52,6 +69,9 @@ export class FrameBridge {
   private intervalHandle: number | null = null;
   private watchdogHandle: number | null = null;
   private frames = 0;
+  private litSamples = 0;
+  private checkedSamples = 0;
+  private sampler: CanvasRenderingContext2D | null = null;
   private stopped = false;
   private scheduler: "requestVideoFrameCallback" | "interval" = "interval";
 
@@ -84,6 +104,16 @@ export class FrameBridge {
   /** Which draw scheduler ended up driving the copy, named in failure reports. */
   get schedulerName(): string {
     return this.scheduler;
+  }
+
+  /** Sampled frames that held any picture. */
+  get litFrames(): number {
+    return this.litSamples;
+  }
+
+  /** Frames whose pixels were read back at all, `0` when readback was refused. */
+  get sampledFrames(): number {
+    return this.checkedSamples;
   }
 
   get width(): number {
@@ -150,6 +180,44 @@ export class FrameBridge {
     if (!this.video.videoWidth || !this.video.videoHeight) return;
     this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
     this.frames += 1;
+    if (this.frames % SAMPLE_EVERY === 1) this.sample();
+  }
+
+  /**
+   * Records whether the frame just drawn contained any picture.
+   *
+   * Counting draws is not enough to tell a working capture from a broken one:
+   * WebKitGTK's GL video sink plays a stream whose frames read back as solid
+   * black through `drawImage`, so the counter climbs, the encoder is fed, and
+   * the recording is black. Only the pixels say which happened.
+   */
+  private sample(): void {
+    try {
+      if (!this.sampler) {
+        const probe = document.createElement("canvas");
+        probe.width = SAMPLE_WIDTH;
+        probe.height = SAMPLE_HEIGHT;
+        this.sampler = probe.getContext("2d", { alpha: false, willReadFrequently: true });
+        if (!this.sampler) return;
+      }
+      this.sampler.drawImage(this.canvas, 0, 0, SAMPLE_WIDTH, SAMPLE_HEIGHT);
+      const { data } = this.sampler.getImageData(0, 0, SAMPLE_WIDTH, SAMPLE_HEIGHT);
+      this.checkedSamples += 1;
+      for (let i = 0; i < data.length; i += 4) {
+        if (
+          data[i]! > BLACK_THRESHOLD ||
+          data[i + 1]! > BLACK_THRESHOLD ||
+          data[i + 2]! > BLACK_THRESHOLD
+        ) {
+          this.litSamples += 1;
+          return;
+        }
+      }
+    } catch {
+      // A readback can be refused outright (a tainted canvas). Leaving the
+      // counters alone reports "never checked", which the caller treats as no
+      // evidence either way rather than as evidence of a black recording.
+    }
   }
 
   private schedule(fps: number): void {
