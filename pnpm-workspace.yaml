@@ -1,0 +1,5 @@
+# esbuild ships its binary as a platform-specific optional dependency, so its
+# install script is not needed — Vite runs fine without it. Declaring it here
+# silences pnpm's ERR_PNPM_IGNORED_BUILDS warning.
+allowBuilds:
+  esbuild: false

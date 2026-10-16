@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build"
+    "beforeDevCommand": "npx --no-install vite",
+    "beforeBuildCommand": "npx --no-install tsc --noEmit && npx --no-install vite build"
   },
   "app": {
     "windows": [

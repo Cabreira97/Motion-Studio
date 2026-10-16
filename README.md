@@ -40,6 +40,12 @@ pnpm first-run
 `pnpm first-run` runs `scripts/bootstrap.mjs` (checks the tools above and
 installs JavaScript dependencies), then launches the desktop app.
 
+The scripts below use pnpm, but nothing in the build requires it — Tauri's
+`beforeDevCommand`/`beforeBuildCommand` invoke the local binaries through
+`npx --no-install`, so npm and yarn work the same. This also keeps the desktop
+app startable when a package-manager policy (for example pnpm's
+`minimumReleaseAge`) would reject re-running an install mid-build.
+
 Other useful scripts:
 
 ```bash
