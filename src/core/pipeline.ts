@@ -1,3 +1,4 @@
+import { toClipTime } from "./cursor.js";
 import { safeFilename } from "./filenames.js";
 import {
   buildPosterArgs,
@@ -7,7 +8,7 @@ import {
 } from "./filtergraph.js";
 import { buildSummaryMarkdown } from "./markdown.js";
 import { getPreset, resolveOutputSize } from "./presets.js";
-import { renderCursorSprite } from "./png.js";
+import { renderCursorSprite, renderRoundedCornerMask } from "./png.js";
 import {
   lastLines,
   ProcessError,
@@ -78,8 +79,15 @@ export async function runExport(
   const summaryPath = ports.join(request.outputDir, `${stem}.md`);
 
   // --- cursor highlight sprite -------------------------------------------------
+  // The overlay is drawn after the trim, so it needs the same clip-relative
+  // track the zoom keyframes were built from.
+  const cursorTrack = toClipTime(
+    project.cursorTrack,
+    normalized.startMs,
+    normalized.durationMs,
+  );
   let cursorOverlayPath = request.cursorOverlayPath;
-  const cursorEnabled = project.cursorStyle.highlight && project.cursorTrack.length > 0;
+  const cursorEnabled = project.cursorStyle.highlight && cursorTrack.length > 0;
   if (cursorEnabled && !cursorOverlayPath) {
     const spriteSize = clamp(
       Math.round(outputSize.height * project.cursorStyle.radiusScale * 2),
@@ -91,6 +99,22 @@ export async function runExport(
     await ports.mkdirp(assetsDir);
     cursorOverlayPath = ports.join(assetsDir, "cursor-sprite.png");
     await ports.writeBinary(cursorOverlayPath, sprite);
+  }
+
+  // --- rounded framing wedge ---------------------------------------------------
+  let cornerMaskPath: string | undefined;
+  const cornerRadius = Math.round(project.framing.cornerRadiusPx);
+  if (cornerRadius > 0) {
+    const assetsDir = ports.join(request.outputDir, ".assets");
+    await ports.mkdirp(assetsDir);
+    cornerMaskPath = ports.join(assetsDir, `corner-${cornerRadius}.png`);
+    await ports.writeBinary(
+      cornerMaskPath,
+      renderRoundedCornerMask({
+        radius: cornerRadius,
+        background: project.framing.background,
+      }),
+    );
   }
 
   // --- plan + render -----------------------------------------------------------
@@ -111,13 +135,14 @@ export async function runExport(
     zoom: { enabled: project.zoom.enabled, keyframes: project.zoom.keyframes },
     cursor: {
       enabled: cursorEnabled && !!cursorOverlayPath,
-      track: project.cursorTrack,
+      track: cursorTrack,
     },
     cursorStyle: project.cursorStyle,
     callouts,
     presetId: preset.id,
     outputPath: videoPath,
     cursorOverlayPath,
+    ...(cornerMaskPath ? { cornerMaskPath } : {}),
     ...(request.fontFile ? { fontFile: request.fontFile } : {}),
   };
 

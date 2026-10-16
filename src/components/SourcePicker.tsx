@@ -76,6 +76,17 @@ export function SourcePicker({
         <span>{t("source.mic")}</span>
       </label>
 
+      {capabilities &&
+        (capabilities.cursorSampling ? (
+          <p className="muted">{t("source.cursorOk")}</p>
+        ) : (
+          <p className="warn-text">
+            {t("source.cursorUnavailable", {
+              reason: capabilities.cursorNote ?? "unknown",
+            })}
+          </p>
+        ))}
+
       {capabilities?.backend && (
         <p className="muted">{t("source.backend", { backend: capabilities.backend })}</p>
       )}

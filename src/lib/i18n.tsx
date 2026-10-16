@@ -46,6 +46,9 @@ const en = {
   "source.regionHint": "Record the screen, crop to a region",
   "source.mic": "Record microphone",
   "source.backend": "Capture backend: {backend}",
+  "source.cursorOk": "Auto zoom will follow your cursor.",
+  "source.cursorUnavailable":
+    "Auto zoom cannot follow the cursor on this system, so recordings export without cursor zoom or highlight. Reason: {reason}",
 
   "kind.screen": "Screen",
   "kind.window": "Window",
@@ -109,6 +112,8 @@ const en = {
   "error.exportNeedsDesktop":
     "Export runs through your local ffmpeg via the desktop app. Start it with pnpm first-run.",
   "error.micWarning": "The microphone was requested but no audio track was returned.",
+  "error.revealFailed": "Could not open a file manager: {message}",
+  "error.copyFailed": "Could not copy the path: {message}",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -146,6 +151,9 @@ const ptBR: Dict = {
   "source.regionHint": "Gravar a tela e recortar uma região",
   "source.mic": "Gravar microfone",
   "source.backend": "Backend de captura: {backend}",
+  "source.cursorOk": "O zoom automático vai acompanhar o seu cursor.",
+  "source.cursorUnavailable":
+    "O zoom automático não consegue acompanhar o cursor neste sistema, então as gravações são exportadas sem zoom nem destaque de cursor. Motivo: {reason}",
 
   "kind.screen": "Tela",
   "kind.window": "Janela",
@@ -209,6 +217,8 @@ const ptBR: Dict = {
   "error.exportNeedsDesktop":
     "A exportação usa o seu ffmpeg local através do aplicativo desktop. Inicie-o com pnpm first-run.",
   "error.micWarning": "O microfone foi solicitado, mas nenhuma faixa de áudio foi retornada.",
+  "error.revealFailed": "Não foi possível abrir um gerenciador de arquivos: {message}",
+  "error.copyFailed": "Não foi possível copiar o caminho: {message}",
 };
 
 const es: Dict = {
@@ -242,6 +252,9 @@ const es: Dict = {
   "source.regionHint": "Grabar la pantalla y recortar una región",
   "source.mic": "Grabar micrófono",
   "source.backend": "Backend de captura: {backend}",
+  "source.cursorOk": "El zoom automático seguirá tu cursor.",
+  "source.cursorUnavailable":
+    "El zoom automático no puede seguir el cursor en este sistema, así que las grabaciones se exportan sin zoom ni resalte de cursor. Motivo: {reason}",
 
   "kind.screen": "Pantalla",
   "kind.window": "Ventana",
@@ -306,6 +319,8 @@ const es: Dict = {
   "error.exportNeedsDesktop":
     "La exportación usa tu ffmpeg local a través de la aplicación de escritorio. Iníciala con pnpm first-run.",
   "error.micWarning": "Se solicitó el micrófono pero no se devolvió ninguna pista de audio.",
+  "error.revealFailed": "No se pudo abrir un gestor de archivos: {message}",
+  "error.copyFailed": "No se pudo copiar la ruta: {message}",
 };
 
 const DICTS: Record<Lang, Dict> = { en, "pt-BR": ptBR, es };

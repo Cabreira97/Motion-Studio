@@ -131,6 +131,64 @@ export function encodePng(width: number, height: number, rgba: Uint8Array): Uint
   return png;
 }
 
+/** Parses `#rgb` / `#rrggbb` into 0..255 components. Defaults to black. */
+export function parseHexColor(value: string): [number, number, number] {
+  const hex = value.trim().replace(/^#/, "");
+  const full =
+    hex.length === 3
+      ? hex
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : hex;
+  if (!/^[0-9a-fA-F]{6}$/.test(full)) return [0, 0, 0];
+  return [
+    parseInt(full.slice(0, 2), 16),
+    parseInt(full.slice(2, 4), 16),
+    parseInt(full.slice(4, 6), 16),
+  ];
+}
+
+export interface CornerMaskOptions {
+  /** Corner radius in pixels; the sprite is `radius` × `radius`. */
+  radius: number;
+  /** Framing background colour, painted over the clipped corner. */
+  background: string;
+}
+
+/**
+ * Draws a single top-left rounded-corner wedge: the area *outside* the arc is
+ * filled with the framing background, the rest is transparent.
+ *
+ * Overlaying this (and its flipped copies) on the four corners of the video is
+ * what produces rounded framing. It costs four tiny overlays, where masking
+ * the whole frame with `geq` measured ~5x slower than the rest of the render.
+ */
+export function renderRoundedCornerMask(options: CornerMaskOptions): Uint8Array {
+  const size = Math.max(1, Math.round(options.radius));
+  const [r, g, b] = parseHexColor(options.background);
+  const rgba = new Uint8Array(size * size * 4);
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      // Arc centre sits at the inner corner of the patch. Sample the pixel
+      // centre so the edge lands where the eye expects it.
+      const dx = size - (x + 0.5);
+      const dy = size - (y + 0.5);
+      const dist = Math.hypot(dx, dy);
+      // One pixel of feathering across the arc: opaque outside, clear inside.
+      const alpha = Math.max(0, Math.min(1, dist - size + 0.5));
+      const i = (y * size + x) * 4;
+      rgba[i] = r;
+      rgba[i + 1] = g;
+      rgba[i + 2] = b;
+      rgba[i + 3] = Math.round(alpha * 255);
+    }
+  }
+
+  return encodePng(size, size, rgba);
+}
+
 export interface CursorSpriteOptions {
   /** Sprite diameter in pixels. */
   size: number;

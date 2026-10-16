@@ -4,7 +4,9 @@ import {
   adler32,
   crc32,
   encodePng,
+  parseHexColor,
   renderCursorSprite,
+  renderRoundedCornerMask,
   zlibStored,
 } from "../src/core/png.js";
 
@@ -16,6 +18,19 @@ function readU32(bytes: Uint8Array, offset: number): number {
       bytes[offset + 3]!) >>>
     0
   );
+}
+
+/**
+ * Reads one RGBA pixel back out of a PNG produced by `encodePng`. Only valid
+ * because the encoder emits a single stored DEFLATE block with filter 0, which
+ * puts the pixel bytes at a fixed offset.
+ */
+function readPixel(png: Uint8Array, width: number, x: number, y: number): number[] {
+  // 8 (signature) + 25 (IHDR chunk) + 8 (IDAT len+type) + 2 (zlib) + 5 (block)
+  const raw = 48;
+  const stride = width * 4;
+  const at = raw + y * (stride + 1) + 1 + x * 4;
+  return [...png.slice(at, at + 4)];
 }
 
 describe("crc32 / adler32", () => {
@@ -75,5 +90,40 @@ describe("renderCursorSprite", () => {
     // Decode the first pixel (top-left, filter byte then RGBA).
     // Raw scanline starts at IDAT payload; easier: re-encode expectation via size.
     expect(png.length).toBeGreaterThan(PNG_SIGNATURE.length);
+  });
+});
+
+describe("parseHexColor", () => {
+  it("parses long and short hex forms", () => {
+    expect(parseHexColor("#0f1115")).toEqual([15, 17, 21]);
+    expect(parseHexColor("0f1115")).toEqual([15, 17, 21]);
+    expect(parseHexColor("#fff")).toEqual([255, 255, 255]);
+  });
+
+  it("falls back to black on malformed input", () => {
+    expect(parseHexColor("not-a-color")).toEqual([0, 0, 0]);
+    expect(parseHexColor("")).toEqual([0, 0, 0]);
+  });
+});
+
+describe("renderRoundedCornerMask", () => {
+  it("is a square sprite the size of the radius", () => {
+    const png = renderRoundedCornerMask({ radius: 24, background: "#0f1115" });
+    expect([...png.slice(0, 8)]).toEqual([...PNG_SIGNATURE]);
+    expect(readU32(png, 16)).toBe(24);
+    expect(readU32(png, 20)).toBe(24);
+  });
+
+  it("paints the outer corner opaque and the inner arc clear", () => {
+    const png = renderRoundedCornerMask({ radius: 12, background: "#0f1115" });
+    // (0,0) is the outside of the arc: fully covered by the background.
+    expect(readPixel(png, 12, 0, 0)).toEqual([15, 17, 21, 255]);
+    // (11,11) sits at the arc centre, well inside the rounded area.
+    expect(readPixel(png, 12, 11, 11)[3]).toBe(0);
+  });
+
+  it("never produces a zero-sized sprite", () => {
+    const png = renderRoundedCornerMask({ radius: 0.2, background: "#fff" });
+    expect(readU32(png, 16)).toBe(1);
   });
 });
