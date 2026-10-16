@@ -45,10 +45,19 @@ core-foundation = "0.10"
 # machine — there we report cursor sampling as unavailable with a reason.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11-dl = "2.21"
-# Needed to answer WebKitGTK's capture permission prompt (see
-# src/webview_permissions.rs). Must resolve to the same version wry links
-# against, or `with_webview` hands back a different `WebView` type.
-webkit2gtk = "2.0"
+# Native screen capture. The webview cannot capture here: WebKitGTK's display
+# track encodes to zero frames, and its frames read back black through both a 2D
+# canvas and WebGL, measured on real hardware. `ashpd` asks xdg-desktop-portal
+# for a ScreenCast session over D-Bus (pure Rust, through zbus) and `pipewire`
+# reads the frames the portal hands back; they go to the ffmpeg this app already
+# requires. See src/native_capture.rs.
+#
+# Building `pipewire` needs the PipeWire headers: `sudo apt install
+# libpipewire-0.3-dev` on Debian/Ubuntu. Linux/BSD only, so Windows and macOS
+# builds are untouched.
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
+pipewire = "0.10"
+tokio = { version = "1", features = ["rt", "time", "net"] }
 
 [profile.release]
 codegen-units = 1

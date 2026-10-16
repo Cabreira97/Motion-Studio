@@ -72,6 +72,28 @@ export interface CaptureCapabilities {
   /** Why cursor sampling is unavailable, when it is (Wayland, no DISPLAY, …). */
   cursorNote: string | null;
   backend: string;
+  /**
+   * Which recorder the frontend should drive.
+   *
+   * `"webview"` records with `getDisplayMedia` + `MediaRecorder` and hands back
+   * a blob to save. `"native"` is used on Linux, where the webview cannot
+   * capture at all — WebKitGTK's display frames encode to nothing and read back
+   * black — so Rust records through xdg-desktop-portal and writes the file
+   * itself, and there is no blob.
+   */
+  videoBackend: "native" | "webview";
+}
+
+/** A recording the native backend has already written (mirrors `NativeRecording`). */
+export interface NativeRecording {
+  path: string;
+  width: number;
+  height: number;
+  /** Frames written to the encoder: duration times frame rate. */
+  frames: number;
+  /** Frames the compositor delivered; zero means nothing was captured. */
+  delivered: number;
+  hasAudio: boolean;
 }
 
 export interface ProcessOutput {
@@ -97,6 +119,11 @@ export interface MediaInfo {
 export const bridge = {
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
   captureCapabilities: () => invoke<CaptureCapabilities>("capture_capabilities"),
+  // Resolves only once the portal picker has been answered and the first frame
+  // has arrived, so a resolved promise means a recording really is under way.
+  nativeCaptureStart: (kind: string, fps: number, mic: boolean, name: string) =>
+    invoke<string>("native_capture_start", { kind, fps, mic, name }),
+  nativeCaptureStop: () => invoke<NativeRecording>("native_capture_stop"),
   probeMedia: (path: string) => invoke<MediaInfo>("probe_media", { path }),
   runFfmpeg: (args: string[]) => invoke<ProcessOutput>("run_ffmpeg", { args }),
   resolveRecordingPath: (name: string) =>
@@ -165,11 +192,18 @@ export async function listen<T>(
 }
 
 /**
- * Converts a local file path into a URL the webview can load. Falls back to the
- * path unchanged in the browser where there is no asset protocol.
+ * Converts a local file path into a URL the webview can play.
+ *
+ * The asset protocol is the usual answer and the one Windows and macOS use.
+ * WebKitGTK will not play media from it — a `<video>` on `asset://` fails with
+ * MEDIA_ERR_SRC_NOT_SUPPORTED even though the scheme handler answers — so on
+ * Linux the Rust side hands back a loopback HTTP URL instead. Falls back to the
+ * path unchanged in the browser, where there is no asset protocol at all.
  */
-export async function toAssetUrl(path: string): Promise<string> {
+export async function toMediaUrl(path: string): Promise<string> {
   if (!isTauri()) return path;
+  const served = await invoke<string | null>("media_url", { path });
+  if (served) return served;
   const { convertFileSrc } = await import("@tauri-apps/api/core");
   return convertFileSrc(path);
 }

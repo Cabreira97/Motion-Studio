@@ -1,11 +1,26 @@
 /**
- * Webview screen recording: `getDisplayMedia` for the picture (the OS shows
- * its own screen/window picker) plus an optional microphone track, combined
- * into a single `MediaRecorder` recording. Region capture is a non-destructive
- * crop applied later in the ffmpeg render step.
+ * Screen recording, in the two shapes this app supports.
+ *
+ * [`ScreenRecorder`] is the webview one: `getDisplayMedia` for the picture (the
+ * OS shows its own screen/window picker) plus an optional microphone track,
+ * combined into a single `MediaRecorder`. It hands back a blob to save.
+ *
+ * [`NativeRecorder`] drives the Rust backend instead, and is what Linux uses.
+ * The webview cannot capture there at all: WebKitGTK's display track encodes to
+ * zero frames, and its frames read back black through both a 2D canvas and
+ * WebGL — measured, with the saved file reporting limited-range black on every
+ * frame. Rust records through xdg-desktop-portal and writes the file itself, so
+ * that recorder returns a path and no blob.
+ *
+ * Which one runs is decided by `captureCapabilities().videoBackend`, because
+ * the platform is the Rust side's to report, not something to sniff from a user
+ * agent string.
+ *
+ * Region capture is a non-destructive crop applied later in the ffmpeg render
+ * step, in both backends.
  */
 
-import { FrameBridge } from "./frame-bridge.js";
+import { bridge } from "./bridge.js";
 
 export type CaptureKind = "screen" | "window" | "region";
 
@@ -13,14 +28,27 @@ export interface StartOptions {
   kind: CaptureKind;
   mic: boolean;
   fps?: number;
+  /** Used to name the file when the backend is the one writing it. */
+  name?: string;
 }
 
 export interface RecordingResult {
-  blob: Blob;
+  /** The encoded bytes, when the webview recorded. `null` for a native one. */
+  blob: Blob | null;
+  /** Where the file already is, when the backend wrote it. `null` otherwise. */
+  path: string | null;
   mimeType: string;
   hasAudio: boolean;
   width: number;
   height: number;
+}
+
+/** What `App` drives, whichever backend is behind it. */
+export interface Recorder {
+  readonly elapsedMs: number;
+  start(options: StartOptions): Promise<void>;
+  stop(): Promise<RecordingResult>;
+  cancel(): void;
 }
 
 const AV_MIME_CANDIDATES = [
@@ -59,18 +87,26 @@ export interface CaptureSize {
 }
 
 /**
- * The resolution to ask a display source for: the screen in device pixels.
+ * Rounds a frame size down to even sides.
  *
- * Rounded down to even numbers because I420 — what every WebM encoder here
- * consumes — stores chroma at half resolution in both axes, so an odd side has
- * no valid chroma plane and the encoder refuses to configure.
+ * I420 stores chroma at half resolution in both axes, so an odd side has no
+ * valid chroma plane and the encoder refuses to configure — an observed 112x63
+ * display track was enough to produce a recording with no frames in it.
  */
+export function evenSize(width: number, height: number): CaptureSize {
+  const w = Math.max(2, Math.floor(width));
+  const h = Math.max(2, Math.floor(height));
+  return { width: w - (w % 2), height: h - (h % 2) };
+}
+
+/** The resolution to ask a display source for: the screen in device pixels. */
 export function preferredCaptureSize(): CaptureSize {
   const screen = typeof globalThis.screen === "object" ? globalThis.screen : null;
   const ratio = typeof devicePixelRatio === "number" && devicePixelRatio > 0 ? devicePixelRatio : 1;
-  const width = Math.round((screen?.width ?? 1920) * ratio);
-  const height = Math.round((screen?.height ?? 1080) * ratio);
-  return { width: width - (width % 2), height: height - (height % 2) };
+  return evenSize(
+    Math.round((screen?.width ?? 1920) * ratio),
+    Math.round((screen?.height ?? 1080) * ratio),
+  );
 }
 
 /**
@@ -84,6 +120,7 @@ export function preferredCaptureSize(): CaptureSize {
  */
 export function buildDisplayConstraints(
   fps: number,
+  kind: CaptureKind = "screen",
   size: CaptureSize = preferredCaptureSize(),
 ): MediaTrackConstraints | true {
   const supported = navigator.mediaDevices.getSupportedConstraints?.() ?? {};
@@ -100,17 +137,17 @@ export function buildDisplayConstraints(
   // it, so it never configures and the recording ends up as a bare header.
   if (supported.width) video.width = { ideal: size.width };
   if (supported.height) video.height = { ideal: size.height };
-  // `displaySurface` is deliberately never sent, and `kind` is only kept for
-  // the crop applied on export.
+  // Hint the OS picker so "window" surfaces windows first. "region" asks for a
+  // monitor, since the region is a crop applied on export rather than a
+  // different kind of capture.
   //
-  // Filtering on `getSupportedConstraints()` is not enough to make it safe:
-  // WebKitGTK lists `displaySurface` as supported and then rejects the call
-  // anyway — `monitor` is accepted but `window` fails with "Invalid
-  // constraint", after the user has already picked a surface in the portal.
-  // The spec makes it advisory, so nothing is owed by dropping it: every OS
-  // picker already offers screen, window and region, and the user's choice
-  // there is what decides. A hint that cannot be trusted to be ignored is
-  // worth less than the mode it breaks.
+  // This is sent only where it can be trusted. WebKitGTK lists `displaySurface`
+  // as supported and then rejects the call anyway — `monitor` is accepted but
+  // `window` fails with "Invalid constraint" after the user has already picked
+  // a surface — which is why Linux does not use this recorder at all.
+  if (supported.displaySurface) {
+    video.displaySurface = kind === "window" ? "window" : "monitor";
+  }
 
   return Object.keys(video).length > 0 ? video : true;
 }
@@ -156,43 +193,6 @@ const CLUSTER_ID = [0x1f, 0x43, 0xb6, 0x75];
 const CLUSTER_SCAN_BYTES = 64 * 1024;
 
 /**
- * Explains a well-formed recording that holds no picture, or `null` if it does.
- *
- * `canvas.captureStream(fps)` emits frames at its fixed rate whether or not
- * anything was ever drawn onto the canvas, so a capture source that delivers
- * nothing still produces a complete, playable file — of a blank canvas. Byte
- * size and cluster presence both read as success there. The count of frames
- * drawn from the source is the only reading that does not, so it decides.
- */
-export interface BlankCheck {
-  drawnFrames: number;
-  elapsedMs: number;
-  /** Frames whose pixels were read back; `0` means readback never succeeded. */
-  sampledFrames: number;
-  /** Of those, how many held any picture. */
-  litFrames: number;
-  scheduler: string;
-}
-
-export function describeBlankRecording(check: BlankCheck): string | null {
-  const { drawnFrames, elapsedMs, sampledFrames, litFrames, scheduler } = check;
-  // Name the scheduler: both of them having drawn nothing rules out the draw
-  // loop itself, which is the next thing anyone reading this would suspect.
-  const how = scheduler ? ` (draw scheduler: ${scheduler})` : "";
-  if (drawnFrames === 0) {
-    return `The capture source produced no picture in ${Math.round(elapsedMs)}ms${how} — the share was approved and the track reported itself live, but not one frame arrived. Saving this would have produced a blank video.`;
-  }
-  // Frames arrived and every one of them was black. On Linux this is
-  // WebKitGTK's GL video sink handing out GPU-side frames that read back as
-  // black; `WEBKIT_GST_DISABLE_GL_SINK=1` is what turns that off, and the app
-  // sets it at startup — so reaching here means it did not take effect.
-  if (sampledFrames > 0 && litFrames === 0) {
-    return `All ${drawnFrames} captured frames were black (${sampledFrames} checked, none with any picture). The capture and the encoder both worked; the frames themselves carried no image. On Linux this is the webview's GL video sink — try starting the app with WEBKIT_GST_DISABLE_GL_SINK=1.`;
-  }
-  return null;
-}
-
-/**
  * Reports whether a recording contains any muxed frame.
  *
  * A stalled muxer still emits a valid-looking file: WebKitGTK produced a 178
@@ -212,7 +212,15 @@ export async function hasMediaClusters(blob: Blob): Promise<boolean> {
   return false;
 }
 
-export function recorderSupported(): boolean {
+/**
+ * Whether recording can start at all with the backend the Rust side reports.
+ *
+ * The native backend needs nothing from the webview — no `getDisplayMedia`, no
+ * `MediaRecorder`, not even a `MediaStream` — so checking for them there would
+ * refuse to record over APIs it never calls.
+ */
+export function recorderSupported(videoBackend: string): boolean {
+  if (videoBackend === "native") return true;
   return (
     typeof navigator !== "undefined" &&
     !!navigator.mediaDevices &&
@@ -221,7 +229,7 @@ export function recorderSupported(): boolean {
   );
 }
 
-export class ScreenRecorder {
+export class ScreenRecorder implements Recorder {
   private recorder: MediaRecorder | null = null;
   private chunks: Blob[] = [];
   private displayStream: MediaStream | null = null;
@@ -232,18 +240,13 @@ export class ScreenRecorder {
   private hasAudio = false;
   private recorderError: string | null = null;
   private videoTrack: MediaStreamTrack | null = null;
-  private bridge: FrameBridge | null = null;
-  private drawnFrames = 0;
-  private scheduler = "";
-  private litFrames = 0;
-  private sampledFrames = 0;
 
   get elapsedMs(): number {
     return this.startedAt === 0 ? 0 : performance.now() - this.startedAt;
   }
 
   async start(options: StartOptions): Promise<void> {
-    if (!recorderSupported()) {
+    if (!recorderSupported("webview")) {
       throw new Error(
         "Screen capture is not available in this environment. The desktop app (pnpm first-run) provides screen recording.",
       );
@@ -251,7 +254,7 @@ export class ScreenRecorder {
     if (this.recorder) throw new Error("A recording is already in progress.");
 
     const fps = options.fps ?? 30;
-    const video = buildDisplayConstraints(fps);
+    const video = buildDisplayConstraints(fps, options.kind);
     try {
       // Must stay in the same synchronous turn as the click: `getDisplayMedia`
       // spends the user gesture, so there is no retrying it. A second attempt
@@ -295,27 +298,6 @@ export class ScreenRecorder {
       if (this.recorder && this.recorder.state !== "inactive") this.recorder.stop();
     });
 
-    // Record a canvas copy of the capture, not the capture track itself. See
-    // frame-bridge.ts: WebKitGTK's display track delivers no frame to its own
-    // encoder, while the same encoder records a canvas stream correctly.
-    const size = preferredCaptureSize();
-    try {
-      // Awaiting here is safe: the user gesture was already spent by
-      // `getDisplayMedia` above and nothing after this point needs one.
-      this.bridge = await FrameBridge.open(new MediaStream([videoTrack]), {
-        fps,
-        width: this.resultWidth || size.width,
-        height: this.resultHeight || size.height,
-      });
-      tracks[0] = this.bridge.videoTrack;
-    } catch (error) {
-      // The share is already approved at this point, so failing without
-      // releasing it would leave the OS screen-sharing indicator on with no
-      // recording behind it and no way to start a new one.
-      this.cleanup();
-      throw error;
-    }
-
     const stream = new MediaStream(tracks);
     const mimeType = pickMimeType(this.hasAudio);
     this.chunks = [];
@@ -347,19 +329,7 @@ export class ScreenRecorder {
     if (settings.height) this.resultHeight = settings.height;
   }
 
-  private blankCheck(): BlankCheck {
-    return {
-      drawnFrames: this.drawnFrames,
-      elapsedMs: this.elapsedMs,
-      sampledFrames: this.sampledFrames,
-      litFrames: this.litFrames,
-      scheduler: this.scheduler,
-    };
-  }
-
   private cleanup(): void {
-    this.bridge?.stop();
-    this.bridge = null;
     this.displayStream?.getTracks().forEach((t) => t.stop());
     this.micStream?.getTracks().forEach((t) => t.stop());
     this.displayStream = null;
@@ -375,17 +345,8 @@ export class ScreenRecorder {
       recorder.onstop = () => resolve();
     });
     // Read the size while the track is still running: by now it has delivered
-    // frames, so this is the first point the reported size can be trusted. The
-    // canvas is the authority, since that is what was encoded.
+    // frames, so this is the first point the reported size can be trusted.
     if (this.videoTrack) this.readDimensions(this.videoTrack);
-    if (this.bridge) {
-      this.resultWidth = this.bridge.width;
-      this.resultHeight = this.bridge.height;
-      this.drawnFrames = this.bridge.drawnFrames;
-      this.scheduler = this.bridge.schedulerName;
-      this.litFrames = this.bridge.litFrames;
-      this.sampledFrames = this.bridge.sampledFrames;
-    }
     if (recorder.state !== "inactive") recorder.stop();
     await finished;
 
@@ -393,6 +354,7 @@ export class ScreenRecorder {
     const blob = new Blob(this.chunks, { type: mimeType });
     const result: RecordingResult = {
       blob,
+      path: null,
       mimeType,
       hasAudio: this.hasAudio,
       width: this.resultWidth,
@@ -401,9 +363,7 @@ export class ScreenRecorder {
     // Diagnose before cleanup, while the track state is still readable and
     // `elapsedMs` still has a start time to measure from.
     const empty = blob.size === 0 || !(await hasMediaClusters(blob));
-    const diagnosis = empty
-      ? this.diagnoseEmpty(mimeType)
-      : describeBlankRecording(this.blankCheck());
+    const diagnosis = empty ? this.diagnoseEmpty(mimeType) : null;
     this.recorder = null;
     this.chunks = [];
     this.videoTrack = null;
@@ -434,12 +394,7 @@ export class ScreenRecorder {
     if (track?.muted) {
       return `The capture source delivered no frames (the track stayed muted) after ${Math.round(this.elapsedMs)}ms. The screen share was approved but never produced a picture.`;
     }
-    // The frame counter is the one unambiguous reading available: it counts
-    // pictures that actually arrived from the capture source, so zero rules the
-    // encoder out entirely and anything above zero rules the source out.
-    const blank = describeBlankRecording(this.blankCheck());
-    if (blank) return blank;
-    return `${this.drawnFrames} frames were captured but none were encoded (format ${mimeType}, ${this.resultWidth}×${this.resultHeight}). The capture worked and the encoder dropped it.`;
+    return `The capture produced no encoded frames (format ${mimeType}, ${this.resultWidth}×${this.resultHeight}). The share was approved and the track stayed live, so the encoder is what dropped it.`;
   }
 
   /** Aborts without producing a result. */
@@ -450,4 +405,73 @@ export class ScreenRecorder {
     this.videoTrack = null;
     this.cleanup();
   }
+}
+
+/**
+ * Drives the Rust capture backend, used where the webview cannot record.
+ *
+ * Everything here is one `invoke` away, because the work genuinely happens in
+ * Rust: the portal session, the PipeWire stream and ffmpeg all live there, and
+ * the file is already on disk by the time `stop` resolves. That is why
+ * `RecordingResult.blob` is `null` — there is nothing to save, and handing the
+ * bytes back through the bridge just to write them out again would copy a
+ * multi-hundred-megabyte recording through JSON for no reason.
+ */
+export class NativeRecorder implements Recorder {
+  private startedAt = 0;
+  private running = false;
+
+  get elapsedMs(): number {
+    return this.startedAt === 0 ? 0 : performance.now() - this.startedAt;
+  }
+
+  async start(options: StartOptions): Promise<void> {
+    if (this.running) throw new Error("A recording is already in progress.");
+    const fps = options.fps ?? 30;
+    const name = options.name ?? "Recording";
+    // Resolves only once the picker has been answered and the first frame has
+    // arrived, so the clock starts when there is really a picture to time.
+    await bridge.nativeCaptureStart(options.kind, fps, options.mic, name);
+    this.running = true;
+    this.startedAt = performance.now();
+  }
+
+  async stop(): Promise<RecordingResult> {
+    if (!this.running) throw new Error("No recording is in progress.");
+    this.running = false;
+    this.startedAt = 0;
+    const recording = await bridge.nativeCaptureStop();
+    return {
+      blob: null,
+      path: recording.path,
+      // What the backend encodes. Kept as a declaration rather than read back
+      // from the file, which `probeMedia` does anyway right after this.
+      mimeType: "video/webm",
+      hasAudio: recording.hasAudio,
+      width: recording.width,
+      height: recording.height,
+    };
+  }
+
+  cancel(): void {
+    if (!this.running) return;
+    this.running = false;
+    this.startedAt = 0;
+    // Nothing waits on this: cancelling means the result is being thrown away,
+    // and the backend still has to be told to release the screen share.
+    void bridge.nativeCaptureStop().catch((error: unknown) => {
+      console.warn("Could not stop the native capture cleanly:", error);
+    });
+  }
+}
+
+/**
+ * Picks the recorder for this platform, as reported by the backend.
+ *
+ * Sniffing the user agent would be the wrong test twice over: the thing that
+ * decides is which engine the webview embeds, and the Rust side is the only
+ * part that knows whether a native backend was compiled in at all.
+ */
+export function createRecorder(videoBackend: string): Recorder {
+  return videoBackend === "native" ? new NativeRecorder() : new ScreenRecorder();
 }
