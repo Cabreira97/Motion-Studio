@@ -170,6 +170,14 @@ export default function App() {
       }
       const result = await recorder.stop();
 
+      // The recorder's own track wins where it has one. On Wayland the OS
+      // sampler cannot see the pointer at all — no client can — so the only
+      // positions that exist come from the capture stream, and they are already
+      // timestamped against the file that was just written.
+      if (result.cursorTrack) {
+        cursorTrack = result.cursorTrack.map((s) => ({ t: s.t, x: s.x, y: s.y }));
+      }
+
       let sourcePath = "";
       let sourceWidth = result.width;
       let sourceHeight = result.height;
