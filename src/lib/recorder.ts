@@ -144,12 +144,32 @@ export function describeCaptureFailure(
 const CLUSTER_ID = [0x1f, 0x43, 0xb6, 0x75];
 
 /**
- * Window scanned for the first cluster. The recorder is started with a 1s
- * timeslice, so a working capture emits a cluster a few hundred bytes after the
- * header — reading the whole blob (hundreds of MB) to learn the same thing
- * would be pointless.
+ * Window scanned for the first cluster. A working capture opens one a few
+ * hundred bytes past the header, so reading the whole blob (hundreds of MB) to
+ * learn the same thing would be pointless.
  */
 const CLUSTER_SCAN_BYTES = 64 * 1024;
+
+/**
+ * Explains a well-formed recording that holds no picture, or `null` if it does.
+ *
+ * `canvas.captureStream(fps)` emits frames at its fixed rate whether or not
+ * anything was ever drawn onto the canvas, so a capture source that delivers
+ * nothing still produces a complete, playable file — of a blank canvas. Byte
+ * size and cluster presence both read as success there. The count of frames
+ * drawn from the source is the only reading that does not, so it decides.
+ */
+export function describeBlankRecording(
+  drawnFrames: number,
+  elapsedMs: number,
+  scheduler = "",
+): string | null {
+  if (drawnFrames > 0) return null;
+  // Name the scheduler: both of them having drawn nothing rules out the draw
+  // loop itself, which is the next thing anyone reading this would suspect.
+  const how = scheduler ? ` (draw scheduler: ${scheduler})` : "";
+  return `The capture source produced no picture in ${Math.round(elapsedMs)}ms${how} — the share was approved and the track reported itself live, but not one frame arrived. Saving this would have produced a blank video.`;
+}
 
 /**
  * Reports whether a recording contains any muxed frame.
@@ -160,20 +180,6 @@ const CLUSTER_SCAN_BYTES = 64 * 1024;
  * "End of file". Looking for a cluster distinguishes "no frames" from "small
  * recording" without guessing at a size threshold.
  */
-/**
- * Explains a well-formed recording that holds no picture, or `null` if it does.
- *
- * `canvas.captureStream(fps)` emits frames at its fixed rate whether or not
- * anything was ever drawn onto the canvas, so a capture source that delivers
- * nothing still produces a complete, playable file — of a blank canvas. Byte
- * size and cluster presence both read as success there. The count of frames
- * drawn from the source is the only reading that does not, so it decides.
- */
-export function describeBlankRecording(drawnFrames: number, elapsedMs: number): string | null {
-  if (drawnFrames > 0) return null;
-  return `The capture source produced no picture in ${Math.round(elapsedMs)}ms — the share was approved and the track reported itself live, but not one frame arrived. Saving this would have produced a blank video.`;
-}
-
 export async function hasMediaClusters(blob: Blob): Promise<boolean> {
   const head = new Uint8Array(await blob.slice(0, CLUSTER_SCAN_BYTES).arrayBuffer());
   outer: for (let i = 0; i + CLUSTER_ID.length <= head.length; i += 1) {
@@ -207,6 +213,7 @@ export class ScreenRecorder {
   private videoTrack: MediaStreamTrack | null = null;
   private bridge: FrameBridge | null = null;
   private drawnFrames = 0;
+  private scheduler = "";
 
   get elapsedMs(): number {
     return this.startedAt === 0 ? 0 : performance.now() - this.startedAt;
@@ -342,6 +349,7 @@ export class ScreenRecorder {
       this.resultWidth = this.bridge.width;
       this.resultHeight = this.bridge.height;
       this.drawnFrames = this.bridge.drawnFrames;
+      this.scheduler = this.bridge.schedulerName;
     }
     if (recorder.state !== "inactive") recorder.stop();
     await finished;
@@ -360,7 +368,7 @@ export class ScreenRecorder {
     const empty = blob.size === 0 || !(await hasMediaClusters(blob));
     const diagnosis = empty
       ? this.diagnoseEmpty(mimeType)
-      : describeBlankRecording(this.drawnFrames, this.elapsedMs);
+      : describeBlankRecording(this.drawnFrames, this.elapsedMs, this.scheduler);
     this.recorder = null;
     this.chunks = [];
     this.videoTrack = null;
@@ -394,7 +402,7 @@ export class ScreenRecorder {
     // The frame counter is the one unambiguous reading available: it counts
     // pictures that actually arrived from the capture source, so zero rules the
     // encoder out entirely and anything above zero rules the source out.
-    const blank = describeBlankRecording(this.drawnFrames, this.elapsedMs);
+    const blank = describeBlankRecording(this.drawnFrames, this.elapsedMs, this.scheduler);
     if (blank) return blank;
     return `${this.drawnFrames} frames were captured but none were encoded (format ${mimeType}, ${this.resultWidth}×${this.resultHeight}). The capture worked and the encoder dropped it.`;
   }

@@ -35,6 +35,9 @@ export function evenSize(width: number, height: number): { width: number; height
   return { width: w - (w % 2), height: h - (h % 2) };
 }
 
+/** How long to wait for a per-frame callback before polling instead. */
+const SCHEDULER_WATCHDOG_MS = 1000;
+
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: () => void) => number;
   cancelVideoFrameCallback?: (handle: number) => void;
@@ -47,8 +50,10 @@ export class FrameBridge {
   private stream: MediaStream;
   private frameHandle: number | null = null;
   private intervalHandle: number | null = null;
+  private watchdogHandle: number | null = null;
   private frames = 0;
   private stopped = false;
+  private scheduler: "requestVideoFrameCallback" | "interval" = "interval";
 
   /**
    * Starts drawing and returns a bridge whose canvas size is already settled.
@@ -74,6 +79,11 @@ export class FrameBridge {
   /** Frames actually drawn from the capture source. */
   get drawnFrames(): number {
     return this.frames;
+  }
+
+  /** Which draw scheduler ended up driving the copy, named in failure reports. */
+  get schedulerName(): string {
+    return this.scheduler;
   }
 
   get width(): number {
@@ -145,25 +155,47 @@ export class FrameBridge {
   private schedule(fps: number): void {
     const request = this.video.requestVideoFrameCallback;
     if (typeof request === "function") {
+      this.scheduler = "requestVideoFrameCallback";
       const pump = () => {
         if (this.stopped) return;
         this.draw();
         this.frameHandle = request.call(this.video, pump);
       };
       this.frameHandle = request.call(this.video, pump);
+      // Per-frame callbacks are the better scheduler — one draw per delivered
+      // frame, no duplicates — but they are only known to fire for a
+      // canvas-backed stream in WebKitGTK, not a display-backed one. If none
+      // has fired by the deadline, fall back rather than let an unfired
+      // callback masquerade as a capture source with no picture.
+      this.watchdogHandle = window.setTimeout(() => {
+        if (this.stopped || this.frames > 0) return;
+        if (this.frameHandle !== null) this.video.cancelVideoFrameCallback?.(this.frameHandle);
+        this.frameHandle = null;
+        this.poll(fps);
+      }, SCHEDULER_WATCHDOG_MS);
       return;
     }
-    // Without per-frame callbacks, poll at the target rate. A repaint-driven
-    // loop is not usable here: the window is normally not visible while
-    // recording, and background throttling would starve the recording.
+    this.poll(fps);
+  }
+
+  /**
+   * Draws at a fixed rate, for engines without per-frame callbacks.
+   *
+   * A repaint-driven loop is not usable here: the window is normally not
+   * visible while recording, and background throttling would starve it.
+   */
+  private poll(fps: number): void {
+    this.scheduler = "interval";
     this.intervalHandle = window.setInterval(() => this.draw(), Math.max(1, Math.round(1000 / fps)));
   }
 
   stop(): void {
     this.stopped = true;
     if (this.intervalHandle !== null) window.clearInterval(this.intervalHandle);
+    if (this.watchdogHandle !== null) window.clearTimeout(this.watchdogHandle);
     if (this.frameHandle !== null) this.video.cancelVideoFrameCallback?.(this.frameHandle);
     this.intervalHandle = null;
+    this.watchdogHandle = null;
     this.frameHandle = null;
     this.stream.getTracks().forEach((track) => track.stop());
     this.video.srcObject = null;

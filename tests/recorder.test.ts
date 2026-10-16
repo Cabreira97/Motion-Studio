@@ -201,6 +201,10 @@ describe("describeBlankRecording", () => {
   it("passes a recording that drew at least one frame", () => {
     expect(describeBlankRecording(1, 7007)).toBeNull();
   });
+
+  it("names the draw scheduler, which rules the draw loop in or out", () => {
+    expect(describeBlankRecording(0, 7007, "interval")).toContain("draw scheduler: interval");
+  });
 });
 
 describe("buildDisplayConstraints", () => {
