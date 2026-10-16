@@ -1,14 +1,21 @@
 //! Motion Studio — Tauri entry point.
 //!
-//! Architecture: the React webview owns capture (getDisplayMedia + MediaRecorder)
-//! and the pure render planner; this Rust side owns the OS integration that a
-//! webview cannot do safely — SQLite persistence, running the locally-installed
-//! ffmpeg, cursor sampling, the system tray and the recording timer.
+//! Architecture: the React webview owns the pure render planner; this Rust side
+//! owns the OS integration a webview cannot do safely — SQLite persistence,
+//! running the locally-installed ffmpeg, cursor sampling, the system tray and
+//! the recording timer.
+//!
+//! Capture is split by platform. On Windows and macOS the webview records it
+//! with `getDisplayMedia` + `MediaRecorder`. On Linux/BSD it cannot: WebKitGTK
+//! hands out display frames that encode to nothing and read back black, so
+//! capture is native there — see src/native_capture.rs.
 
 mod capture;
 mod commands;
 mod filename;
 mod media;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod native_capture;
 mod session;
 mod store;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -56,6 +63,8 @@ pub fn run() {
                 session: Session::new(),
                 cursor: CursorSampler::new(),
                 recordings_dir,
+                #[cfg(all(unix, not(target_os = "macos")))]
+                native_capture: Mutex::new(None),
             });
 
             session::build_tray(app.handle())?;
@@ -71,6 +80,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_app_info,
             commands::capture_capabilities,
+            commands::native_capture_start,
+            commands::native_capture_stop,
             commands::run_ffmpeg,
             commands::probe_media,
             commands::resolve_recording_path,

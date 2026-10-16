@@ -9,7 +9,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::capture::{self, CaptureCapabilities, CursorSample};
+use crate::capture::{self, CaptureCapabilities, CursorSample, NativeRecording};
 use crate::filename;
 use crate::media::{self, MediaInfo, ProcessOutput};
 use crate::session::{Session, TickPayload};
@@ -20,6 +20,11 @@ pub struct AppState {
     pub session: Session,
     pub cursor: capture::CursorSampler,
     pub recordings_dir: std::path::PathBuf,
+    /// The capture running on the native backend, where there is one. Only one
+    /// at a time: a second portal session would leave the first recording with
+    /// no way to stop it.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub native_capture: Mutex<Option<crate::native_capture::Session>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,6 +109,99 @@ pub fn get_app_info(state: State<'_, AppState>) -> AppInfo {
 #[tauri::command]
 pub fn capture_capabilities() -> CaptureCapabilities {
     capture::capabilities()
+}
+
+/// Starts the native capture backend, returning once frames are flowing.
+///
+/// Returning early would be a lie the UI acts on: it switches to "recording" on
+/// success, so this waits through the portal picker and the first delivered
+/// frame before reporting that a recording is under way.
+#[tauri::command]
+pub fn native_capture_start(
+    state: State<'_, AppState>,
+    kind: String,
+    fps: u32,
+    mic: bool,
+    name: String,
+) -> Result<String, String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use crate::native_capture;
+
+        let mut slot = state
+            .native_capture
+            .lock()
+            .map_err(|_| "the capture slot was poisoned".to_string())?;
+        if slot.is_some() {
+            return Err("A recording is already in progress.".to_string());
+        }
+
+        let kind = native_capture::CaptureKind::parse(&kind)?;
+        let path = unique_recording_path(&state.recordings_dir, &name)?;
+        let ffmpeg = media::ffmpeg_path()?;
+        let session = native_capture::start(kind, fps, mic, path.clone(), ffmpeg)?;
+        *slot = Some(session);
+        Ok(path.to_string_lossy().to_string())
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = (state, kind, fps, mic, name);
+        Err("Native capture is only used on Linux; this platform records in the webview."
+            .to_string())
+    }
+}
+
+/// Stops the native capture and reports what was actually recorded.
+#[tauri::command]
+pub fn native_capture_stop(state: State<'_, AppState>) -> Result<NativeRecording, String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let session = state
+            .native_capture
+            .lock()
+            .map_err(|_| "the capture slot was poisoned".to_string())?
+            .take()
+            .ok_or_else(|| "No recording is in progress.".to_string())?;
+        let recording = session.stop()?;
+        // A capture that produced no picture used to be saved as a valid file
+        // of nothing. Refuse it instead, and say which half failed.
+        if recording.delivered == 0 {
+            return Err(
+                "The capture source produced no picture. The share was approved but the compositor never delivered a frame."
+                    .to_string(),
+            );
+        }
+        if recording.frames == 0 {
+            return Err(
+                "The recording was stopped before any frame could be encoded. Try recording for longer than a moment."
+                    .to_string(),
+            );
+        }
+        Ok(recording)
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = state;
+        Err("Native capture is only used on Linux; this platform records in the webview."
+            .to_string())
+    }
+}
+
+/// Picks a free path for a new recording, numbering it rather than overwriting.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unique_recording_path(
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<std::path::PathBuf, String> {
+    let safe = filename::sanitize(name, "recording", 80);
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut path = dir.join(format!("{safe}.webm"));
+    let mut index = 2;
+    while path.exists() {
+        path = dir.join(format!("{safe}-{index}.webm"));
+        index += 1;
+    }
+    Ok(path)
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ import {
   type CaptureCapabilities,
   type TickPayload,
 } from "./lib/bridge.js";
-import { ScreenRecorder, recorderSupported } from "./lib/recorder.js";
+import { createRecorder, recorderSupported, type Recorder } from "./lib/recorder.js";
 import { loadProjects, persistProject, removeProject } from "./lib/projects.js";
 import { LANGUAGES, useI18n, type Lang, type TranslationKey } from "./lib/i18n.js";
 import { CalloutEditor } from "./components/CalloutEditor.js";
@@ -96,7 +96,7 @@ export default function App() {
   const [exportWarnings, setExportWarnings] = useState<string[]>([]);
   const [lastExport, setLastExport] = useState<ExportArtifact | null>(null);
 
-  const recorderRef = useRef<ScreenRecorder | null>(null);
+  const recorderRef = useRef<Recorder | null>(null);
   const stoppingRef = useRef(false);
   const timerRef = useRef<number | null>(null);
 
@@ -176,22 +176,30 @@ export default function App() {
       let fps = 30;
       let hasAudio = result.hasAudio;
 
-      const bytes = new Uint8Array(await result.blob.arrayBuffer());
-
-      if (isTauri()) {
-        const name = timestampName("Recording", Date.now());
-        const saved = await bridge.saveRecording(name, bytes);
+      if (result.path) {
+        // The native backend already wrote the file. Sending the bytes back
+        // through the bridge only to write them out again would copy a whole
+        // recording through JSON for nothing.
+        sourcePath = result.path;
+      } else if (result.blob && isTauri()) {
+        const bytes = new Uint8Array(await result.blob.arrayBuffer());
+        const saved = await bridge.saveRecording(timestampName("Recording", Date.now()), bytes);
         sourcePath = saved.path;
-        const info = await bridge.probeMedia(saved.path);
+      }
+
+      if (sourcePath && isTauri()) {
+        // Read the real numbers off the file rather than trusting what the
+        // recorder reported: this is what the editor and the export act on.
+        const info = await bridge.probeMedia(sourcePath);
         sourceWidth = info.width || sourceWidth;
         sourceHeight = info.height || sourceHeight;
         durationMs = info.durationMs || durationMs;
         fps = info.fps || fps;
         hasAudio = info.hasAudio;
-        setPreviewUrl(await toAssetUrl(saved.path));
-      } else {
-        setPreviewUrl(URL.createObjectURL(result.blob));
+        setPreviewUrl(await toAssetUrl(sourcePath));
+      } else if (result.blob) {
         sourcePath = URL.createObjectURL(result.blob);
+        setPreviewUrl(sourcePath);
       }
 
       const project = createProject({
@@ -256,8 +264,12 @@ export default function App() {
         throw new Error(t("error.captureUnsupported"));
       }
       setRecState("starting");
-      const recorder = new ScreenRecorder();
-      await recorder.start({ kind, mic, fps: 30 });
+      // The backend decides who records. On Linux the webview cannot, so Rust
+      // does it and writes the file itself; everywhere else this is the
+      // webview recorder and nothing about the flow changes.
+      const recorder = createRecorder(caps?.videoBackend ?? "webview");
+      const name = timestampName("Recording", Date.now());
+      await recorder.start({ kind, mic, fps: 30, name });
       recorderRef.current = recorder;
       setElapsedMs(0);
       if (isTauri()) {
@@ -270,7 +282,7 @@ export default function App() {
       setRecState("idle");
       setRecWarning(errMessage(error));
     }
-  }, [kind, mic, t]);
+  }, [caps, kind, mic, t]);
 
   const commit = useCallback((next: Project) => {
     setProjects((prev) => prev.map((p) => (p.id === next.id ? next : p)));

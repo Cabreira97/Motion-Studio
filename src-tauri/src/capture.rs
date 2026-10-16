@@ -23,6 +23,35 @@ pub struct CursorSample {
     pub y: f64,
 }
 
+/// Who takes the picture. The frontend has to know, because the two backends
+/// produce a recording in different shapes: the webview hands back a `Blob` to
+/// save, while the native one has already written the file.
+pub const VIDEO_BACKEND: &str = if cfg!(all(unix, not(target_os = "macos"))) {
+    "native"
+} else {
+    "webview"
+};
+
+/// A recording the native backend has already written to disk.
+///
+/// Lives here rather than in `native_capture` so the command signature is the
+/// same on every platform, which `tauri::generate_handler!` requires — it
+/// cannot take `#[cfg]` on its entries.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeRecording {
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    /// Frames written to the encoder. Paced against the clock, so this is the
+    /// duration times the frame rate.
+    pub frames: u64,
+    /// Frames the compositor delivered. Fewer than `frames` on a still screen
+    /// and more on a busy one; zero means no picture was ever captured.
+    pub delivered: u64,
+    pub has_audio: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureCapabilities {
@@ -34,6 +63,8 @@ pub struct CaptureCapabilities {
     /// Why cursor sampling is unavailable, when it is. Shown in the UI.
     pub cursor_note: Option<String>,
     pub backend: String,
+    /// `"native"` or `"webview"`. Decides which recorder the frontend drives.
+    pub video_backend: String,
 }
 
 pub fn capabilities() -> CaptureCapabilities {
@@ -45,7 +76,12 @@ pub fn capabilities() -> CaptureCapabilities {
         microphone: true,
         cursor_sampling: cursor.is_ok(),
         cursor_note: cursor.err(),
-        backend: "webview getDisplayMedia + ffmpeg (local)".to_string(),
+        backend: if VIDEO_BACKEND == "native" {
+            "xdg-desktop-portal + PipeWire + ffmpeg (local)".to_string()
+        } else {
+            "webview getDisplayMedia + ffmpeg (local)".to_string()
+        },
+        video_backend: VIDEO_BACKEND.to_string(),
     }
 }
 

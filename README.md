@@ -191,6 +191,27 @@ dropped rather than clamped, so auto-zoom never jumps to an edge.
 
 Install `ffmpeg` from your distro, plus `xdg-utils` for "reveal in folder".
 
+Building also needs the PipeWire headers and clang's bundled headers, because
+screen capture is compiled natively here (see below):
+
+```bash
+sudo apt install libpipewire-0.3-dev libclang-common-21-dev
+```
+
+**Screen capture is native on Linux, not done by the webview.** WebKitGTK hands
+out a display track that encodes to zero frames and whose frames read back solid
+black through both a 2D canvas and WebGL — measured on the saved file, which
+reported limited-range black (`YAVG=16`) on every frame. Nothing in JavaScript
+fixes that, so Rust records instead: it asks `xdg-desktop-portal` for a
+ScreenCast session (the compositor shows its own picker), consumes the PipeWire
+stream, and pipes the frames to the same local ffmpeg everything else uses. The
+portal path also gets two things the webview never did — window capture, and a
+visible mouse pointer, which the compositor bakes into the frame.
+
+Windows and macOS keep recording in the webview with `getDisplayMedia` +
+`MediaRecorder`; the backend reports which recorder to drive, so the choice is
+never sniffed from a user agent.
+
 Cursor sampling needs **X11**: `libX11` is loaded at runtime (`dlopen`), so no
 X11 headers are needed to build and the binary still starts without X11.
 

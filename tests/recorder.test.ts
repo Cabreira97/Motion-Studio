@@ -1,10 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { evenSize } from "../src/lib/frame-bridge.js";
-import type { BlankCheck } from "../src/lib/recorder.js";
 import {
   buildDisplayConstraints,
-  describeBlankRecording,
   describeCaptureFailure,
+  evenSize,
   hasMediaClusters,
   pickMimeType,
   preferredCaptureSize,
@@ -189,57 +187,10 @@ describe("hasMediaClusters", () => {
   });
 });
 
-describe("describeBlankRecording", () => {
-  function check(over: Partial<BlankCheck> = {}): BlankCheck {
-    return {
-      drawnFrames: 148,
-      elapsedMs: 7007,
-      sampledFrames: 5,
-      litFrames: 5,
-      scheduler: "requestVideoFrameCallback",
-      ...over,
-    };
-  }
-
-  it("rejects a well-formed file that no frame was ever drawn into", () => {
-    // The blank-canvas trap: `captureStream(fps)` emits frames on its own
-    // schedule, so a dead capture source still yields a playable file whose
-    // size and cluster check both read as success.
-    const message = describeBlankRecording(check({ drawnFrames: 0, sampledFrames: 0, litFrames: 0 }));
-    expect(message).toContain("no picture in 7007ms");
-    expect(message).toContain("blank video");
-  });
-
-  it("rejects frames that arrived and were all black", () => {
-    // WebKitGTK's GL video sink plays a stream whose frames read back black,
-    // so the draw counter climbs and the encoder is fed a black picture. This
-    // is the only reading that separates that from a working capture.
-    const message = describeBlankRecording(check({ litFrames: 0 }));
-    expect(message).toContain("All 148 captured frames were black");
-    expect(message).toContain("WEBKIT_GST_DISABLE_GL_SINK=1");
-  });
-
-  it("passes a recording whose frames held a picture", () => {
-    expect(describeBlankRecording(check())).toBeNull();
-  });
-
-  it("passes when readback never succeeded, having no evidence either way", () => {
-    // A refused readback must not be read as proof of a black recording.
-    expect(describeBlankRecording(check({ sampledFrames: 0, litFrames: 0 }))).toBeNull();
-  });
-
-  it("names the draw scheduler, which rules the draw loop in or out", () => {
-    const message = describeBlankRecording(
-      check({ drawnFrames: 0, sampledFrames: 0, litFrames: 0, scheduler: "interval" }),
-    );
-    expect(message).toContain("draw scheduler: interval");
-  });
-});
-
 describe("buildDisplayConstraints", () => {
   it("asks for the frame rate when the engine supports it", () => {
     withSupportedConstraints({ frameRate: true });
-    expect(buildDisplayConstraints(30, { width: 2560, height: 1440 })).toEqual({
+    expect(buildDisplayConstraints(30, "screen", { width: 2560, height: 1440 })).toEqual({
       frameRate: { ideal: 30 },
     });
   });
@@ -248,7 +199,7 @@ describe("buildDisplayConstraints", () => {
     // Left unasked, WebKitGTK negotiated 112x63 — right aspect, unusable size,
     // and the odd height alone was enough to stop the encoder configuring.
     withSupportedConstraints({ frameRate: true, width: true, height: true });
-    expect(buildDisplayConstraints(30, { width: 3840, height: 2160 })).toMatchObject({
+    expect(buildDisplayConstraints(30, "screen", { width: 3840, height: 2160 })).toMatchObject({
       width: { ideal: 3840 },
       height: { ideal: 2160 },
     });
@@ -256,18 +207,32 @@ describe("buildDisplayConstraints", () => {
 
   it("omits the size on an engine that does not support it", () => {
     withSupportedConstraints({ frameRate: true });
-    const video = buildDisplayConstraints(30, { width: 3840, height: 2160 });
+    const video = buildDisplayConstraints(30, "screen", { width: 3840, height: 2160 });
     expect(video).not.toHaveProperty("width");
     expect(video).not.toHaveProperty("height");
   });
 
-  it("never sends displaySurface, even when the engine claims to support it", () => {
-    // WebKitGTK lists it as supported and rejects the call anyway: `monitor`
-    // is accepted, `window` fails with "Invalid constraint" after the user has
-    // already picked a surface in the portal. Filtering on
-    // `getSupportedConstraints` is therefore not enough to make it safe.
+  it("hints the picker at the surface the kind asks for", () => {
+    // Only reached where the engine can be trusted with it — Linux drives the
+    // native backend instead, because WebKitGTK lists `displaySurface` as
+    // supported and then rejects `window` with "Invalid constraint" after the
+    // user has already picked a surface in the portal.
     withSupportedConstraints({ frameRate: true, displaySurface: true });
-    expect(buildDisplayConstraints(24)).toEqual({ frameRate: { ideal: 24 } });
+    expect(buildDisplayConstraints(24, "window")).toMatchObject({
+      displaySurface: "window",
+    });
+    // A region is a crop applied on export, not a different kind of capture.
+    expect(buildDisplayConstraints(24, "region")).toMatchObject({
+      displaySurface: "monitor",
+    });
+    expect(buildDisplayConstraints(24, "screen")).toMatchObject({
+      displaySurface: "monitor",
+    });
+  });
+
+  it("omits displaySurface on an engine that does not list it", () => {
+    withSupportedConstraints({ frameRate: true });
+    expect(buildDisplayConstraints(24, "window")).toEqual({ frameRate: { ideal: 24 } });
   });
 
   it("falls back to a bare request when nothing is supported", () => {

@@ -9,13 +9,14 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import os from "node:os";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const isWindows = process.platform === "win32";
+const isLinux = process.platform === "linux";
 
 const C = {
   reset: "\x1b[0m",
@@ -63,6 +64,46 @@ function findFfmpeg() {
   return null;
 }
 
+function listDir(path) {
+  try {
+    return readdirSync(path);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Checks the two system packages the native Linux capture needs to *build*.
+ *
+ * Both failures are opaque if you meet them in `cargo` output: a missing
+ * `libpipewire-0.3.pc` aborts in a `build.rs` panic, and a missing clang
+ * resource directory fails as `'stdbool.h' file not found` from a PipeWire
+ * header, which reads like a broken system header rather than a missing
+ * package. Naming them here costs one `pkg-config` call.
+ */
+function missingLinuxCaptureDeps() {
+  const missing = [];
+  if (run("pkg-config", ["--exists", "libpipewire-0.3"]).status !== 0) {
+    missing.push("libpipewire-0.3-dev");
+  }
+  // bindgen reads PipeWire's headers through libclang, which needs the headers
+  // clang ships itself (`stdbool.h` and friends). Debian splits those out of
+  // the library package, so libclang can be present and unusable.
+  const llvmDirs = listDir("/usr/lib").filter((entry) => entry.startsWith("llvm-"));
+  const hasClangHeaders = llvmDirs
+    .flatMap((entry) => {
+      const base = `/usr/lib/${entry}/lib/clang`;
+      return listDir(base).map((version) => `${base}/${version}/include/stdbool.h`);
+    })
+    .some(existsSync);
+  if (!hasClangHeaders && !hasCommand("clang")) {
+    // The package is version-suffixed; name the version that is actually here.
+    const version = llvmDirs.map((entry) => entry.slice("llvm-".length)).sort().pop();
+    missing.push(version ? `libclang-common-${version}-dev` : "libclang-common-dev");
+  }
+  return missing;
+}
+
 function main() {
   console.log(`\n${C.bold}${C.cyan}Motion Studio — first run${C.reset}\n`);
 
@@ -98,6 +139,16 @@ function main() {
           : "Install it with:  sudo apt install ffmpeg",
     );
     warn("Then re-run this command (a new terminal refreshes PATH).");
+  }
+
+  // Native screen capture (Linux only — Windows and macOS record in the webview)
+  const missingCapture = isLinux ? missingLinuxCaptureDeps() : [];
+  if (isLinux && missingCapture.length === 0) {
+    ok("Screen capture deps: PipeWire and clang headers present");
+  } else if (isLinux) {
+    bad(`Screen capture cannot be built — missing: ${missingCapture.join(", ")}`);
+    warn(`Install them with:  sudo apt install ${missingCapture.join(" ")}`);
+    warn("WebKitGTK cannot capture the screen, so Linux records through PipeWire.");
   }
 
   // Rust toolchain (needed to build the desktop shell)
@@ -141,6 +192,13 @@ function main() {
     );
   }
 
+  if (missingCapture.length > 0) {
+    console.log(
+      `\n  ${C.yellow}Note:${C.reset} without those packages the desktop build fails outright,` +
+        " deep inside cargo. Everything else (editing, export) is unaffected.",
+    );
+  }
+
   const dataDir =
     process.platform === "win32"
       ? join(process.env.APPDATA ?? "", "com.local.motionstudio")
@@ -151,7 +209,7 @@ function main() {
   console.log(`\n${C.dim}Recordings and exports are stored in:${C.reset}\n  ${dataDir}`);
   console.log(`${C.dim}Everything stays on this machine. No accounts, no cloud.${C.reset}\n`);
 
-  process.exit(ffmpeg && pkgManager ? 0 : 1);
+  process.exit(ffmpeg && pkgManager && missingCapture.length === 0 ? 0 : 1);
 }
 
 main();
