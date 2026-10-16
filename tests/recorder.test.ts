@@ -237,13 +237,10 @@ describe("describeBlankRecording", () => {
 });
 
 describe("buildDisplayConstraints", () => {
-  it("asks for the frame rate and the surface hint when both are supported", () => {
-    withSupportedConstraints({ frameRate: true, displaySurface: true });
-    const video = buildDisplayConstraints("window", 30, { width: 2560, height: 1440 });
-    expect(video).not.toBe(true);
-    expect(video).toMatchObject({
+  it("asks for the frame rate when the engine supports it", () => {
+    withSupportedConstraints({ frameRate: true });
+    expect(buildDisplayConstraints(30, { width: 2560, height: 1440 })).toEqual({
       frameRate: { ideal: 30 },
-      displaySurface: "window",
     });
   });
 
@@ -251,7 +248,7 @@ describe("buildDisplayConstraints", () => {
     // Left unasked, WebKitGTK negotiated 112x63 — right aspect, unusable size,
     // and the odd height alone was enough to stop the encoder configuring.
     withSupportedConstraints({ frameRate: true, width: true, height: true });
-    expect(buildDisplayConstraints("screen", 30, { width: 3840, height: 2160 })).toMatchObject({
+    expect(buildDisplayConstraints(30, { width: 3840, height: 2160 })).toMatchObject({
       width: { ideal: 3840 },
       height: { ideal: 2160 },
     });
@@ -259,32 +256,23 @@ describe("buildDisplayConstraints", () => {
 
   it("omits the size on an engine that does not support it", () => {
     withSupportedConstraints({ frameRate: true });
-    const video = buildDisplayConstraints("screen", 30, { width: 3840, height: 2160 });
+    const video = buildDisplayConstraints(30, { width: 3840, height: 2160 });
     expect(video).not.toHaveProperty("width");
     expect(video).not.toHaveProperty("height");
   });
 
-  it("maps screen and region to a whole monitor", () => {
+  it("never sends displaySurface, even when the engine claims to support it", () => {
+    // WebKitGTK lists it as supported and rejects the call anyway: `monitor`
+    // is accepted, `window` fails with "Invalid constraint" after the user has
+    // already picked a surface in the portal. Filtering on
+    // `getSupportedConstraints` is therefore not enough to make it safe.
     withSupportedConstraints({ frameRate: true, displaySurface: true });
-    for (const kind of ["screen", "region"] as const) {
-      expect(buildDisplayConstraints(kind, 30)).toMatchObject({
-        displaySurface: "monitor",
-      });
-    }
-  });
-
-  it("drops displaySurface on engines that do not implement it", () => {
-    // WebKitGTK: sending it rejects the whole call with "Invalid constraint",
-    // after the user has already picked a surface in the portal.
-    withSupportedConstraints({ frameRate: true });
-    const video = buildDisplayConstraints("window", 24);
-    expect(video).toEqual({ frameRate: { ideal: 24 } });
-    expect(video).not.toHaveProperty("displaySurface");
+    expect(buildDisplayConstraints(24)).toEqual({ frameRate: { ideal: 24 } });
   });
 
   it("falls back to a bare request when nothing is supported", () => {
     withSupportedConstraints({});
-    expect(buildDisplayConstraints("screen", 30)).toBe(true);
+    expect(buildDisplayConstraints(30)).toBe(true);
   });
 
   it("survives an engine without getSupportedConstraints at all", () => {
@@ -293,6 +281,6 @@ describe("buildDisplayConstraints", () => {
       configurable: true,
       writable: true,
     });
-    expect(buildDisplayConstraints("screen", 30)).toBe(true);
+    expect(buildDisplayConstraints(30)).toBe(true);
   });
 });

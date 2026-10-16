@@ -83,7 +83,6 @@ export function preferredCaptureSize(): CaptureSize {
  * filtering here costs no user gesture.
  */
 export function buildDisplayConstraints(
-  kind: CaptureKind,
   fps: number,
   size: CaptureSize = preferredCaptureSize(),
 ): MediaTrackConstraints | true {
@@ -101,11 +100,17 @@ export function buildDisplayConstraints(
   // it, so it never configures and the recording ends up as a bare header.
   if (supported.width) video.width = { ideal: size.width };
   if (supported.height) video.height = { ideal: size.height };
-  // Hint the OS picker so "window" surfaces windows first; "screen"/"region"
-  // surface full monitors (region is a non-destructive crop applied on export).
-  if ("displaySurface" in supported) {
-    video.displaySurface = kind === "window" ? "window" : "monitor";
-  }
+  // `displaySurface` is deliberately never sent, and `kind` is only kept for
+  // the crop applied on export.
+  //
+  // Filtering on `getSupportedConstraints()` is not enough to make it safe:
+  // WebKitGTK lists `displaySurface` as supported and then rejects the call
+  // anyway — `monitor` is accepted but `window` fails with "Invalid
+  // constraint", after the user has already picked a surface in the portal.
+  // The spec makes it advisory, so nothing is owed by dropping it: every OS
+  // picker already offers screen, window and region, and the user's choice
+  // there is what decides. A hint that cannot be trusted to be ignored is
+  // worth less than the mode it breaks.
 
   return Object.keys(video).length > 0 ? video : true;
 }
@@ -246,7 +251,7 @@ export class ScreenRecorder {
     if (this.recorder) throw new Error("A recording is already in progress.");
 
     const fps = options.fps ?? 30;
-    const video = buildDisplayConstraints(options.kind, fps);
+    const video = buildDisplayConstraints(fps);
     try {
       // Must stay in the same synchronous turn as the click: `getDisplayMedia`
       // spends the user gesture, so there is no retrying it. A second attempt
