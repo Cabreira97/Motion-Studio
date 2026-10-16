@@ -29,6 +29,12 @@ pub fn run() {
         let _ = dotenvy::from_filename(candidate);
     }
 
+    // Before the builder, not in `setup`: windows declared in tauri.conf.json
+    // are created before `setup` runs, and GStreamer reads this while the
+    // webview is being set up. Too late by then.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    webview_permissions::prefer_readable_video_frames();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
