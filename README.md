@@ -6,7 +6,8 @@ and exports shareable H.264/WebM videos — plus a poster frame, transcript and
 Markdown summary. Built with Tauri 2, React, TypeScript, ffmpeg and SQLite.
 
 Everything runs on your machine. There are **no accounts, no billing, no
-telemetry, no analytics, and no hosted control plane**.
+telemetry, no analytics, and no hosted control plane**. Saving exports to
+Google Drive is an optional, opt-in extra.
 
 ---
 
@@ -93,10 +94,60 @@ Copy `.env.example` to `.env` (gitignored) to override defaults:
 | `FFPROBE_PATH` | Explicit ffprobe binary |
 | `WHISPER_CPP_BIN` | Path to a local `whisper.cpp` binary (enables transcription) |
 | `WHISPER_MODEL` | Path to a local whisper model (e.g. `ggml-base.en.bin`) |
+| `GOOGLE_CLIENT_ID` | Optional alternative to entering the Google Drive OAuth client in the app |
+| `GOOGLE_CLIENT_SECRET` | Secret for the same OAuth client |
 
 Secrets and machine-specific paths live only in `.env`, which is never
 committed. Transcription is entirely local and optional: if it is not
 configured, exports still succeed and simply skip the transcript.
+
+### Google Drive (optional)
+
+Exported videos can be saved to your Google Drive with one click. Everything is
+set up from the **Google Drive** tab in the app, which walks through the steps
+below with an "Open page" button for each one. It takes about five minutes,
+once. You use your own free Google OAuth client, so no shared app or server
+is involved.
+
+1. **Create a project** — <https://console.cloud.google.com/projectcreate>
+   (any name, e.g. "Motion Studio"; make sure it is selected afterwards).
+2. **Enable the Google Drive API** —
+   <https://console.cloud.google.com/apis/library/drive.googleapis.com> → *Enable*.
+3. **Configure the consent screen** — <https://console.cloud.google.com/auth/overview>
+   → *Get started*: app name, support email, audience **External**, agree and
+   create.
+4. **Add yourself as a test user** — <https://console.cloud.google.com/auth/audience>
+   → *Test users* → *Add users* → the Google account you will upload with.
+   Skipping this step makes sign-in fail with `Error 403: access_denied`.
+5. **Create the OAuth client** — <https://console.cloud.google.com/auth/clients>
+   → *Create client* → application type **Desktop app** → copy the
+   *Client ID* and *Client secret*.
+6. **Paste both into the Google Drive tab**, click **Save credentials**, then
+   **Connect Google Drive**. Your browser opens the Google sign-in. Google
+   warns that the app is unverified (expected for a personal client):
+   choose *Continue*, allow access, and the page confirms
+   "Google Drive connected".
+
+After that, every export shows **Save to Drive** next to the video (upload
+progress is shown inline), and uploaded exports switch to **Open in Drive**.
+If Drive isn't set up yet, clicking **Save to Drive** opens the setup tab.
+
+How it works and what is stored:
+
+- OAuth uses the installed-app loopback flow with PKCE: the app listens once on
+  `127.0.0.1:<random port>` for the redirect.
+- Only the `drive.file` scope is requested (plus `openid email` to show which
+  account is connected). The app can only see files it uploaded itself, and
+  they go into a **Motion Studio** folder in your Drive.
+- Uploads use Drive's resumable protocol in 8 MB chunks, so large exports
+  don't have to fit in memory. Only files inside the app's recordings
+  directory can be uploaded.
+- The OAuth client is stored in `google-drive-client.json` and the refresh
+  token in `google-drive.json`. Both are in the app-data directory and readable
+  only by your user (`0600`). **Disconnect** revokes the token and deletes it,
+  and **Remove credentials** also deletes the client.
+- `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` in `.env` still work as an
+  alternative; a client saved in the app takes precedence.
 
 ---
 
@@ -112,6 +163,8 @@ directory:
 ```
 com.local.motionstudio/
   motion-studio.sqlite       # project records (paths, trims, zoom, callouts)
+  google-drive-client.json   # only if you set up Google Drive
+  google-drive.json          # only if you connected Google Drive
   recordings/               # original captures (never modified)
     exports/                # rendered videos + posters/transcripts/summaries
 ```
@@ -151,6 +204,8 @@ display server (X11/Wayland) and degrades gracefully when unavailable.
 ## Privacy
 
 - No network calls, no analytics, no crash reporting, no auto-update pings.
+  The single exception is Google Drive upload, which only talks to Google
+  after you connect an account and click "Save to Drive".
 - All rendering uses your local ffmpeg; all transcription (if enabled) uses your
   local whisper.cpp.
 - The only files written are your recordings, exports and the local database

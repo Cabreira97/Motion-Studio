@@ -646,3 +646,89 @@ label span {
   font-size: 12px;
   color: var(--text);
 }
+
+/* ---------------------------------------------------------- google drive */
+.drive-setup {
+  max-width: 860px;
+}
+
+.drive-setup__status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 16px 0 4px;
+}
+
+.drive-setup__client {
+  margin-top: 16px;
+}
+
+.drive-setup__id {
+  display: block;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.drive-setup__heading {
+  margin: 24px 0 8px;
+  font-size: 15px;
+}
+
+.drive-setup__notes {
+  margin-top: 20px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.steps {
+  list-style: none;
+  counter-reset: step;
+  padding: 0;
+  margin: 0;
+}
+
+.steps__item {
+  counter-increment: step;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.steps__item::before {
+  content: counter(step);
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+}
+
+.steps__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.drive-form {
+  margin-top: 10px;
+  max-width: 560px;
+}
+
+.drive-form .input {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.drive-form__secret {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}

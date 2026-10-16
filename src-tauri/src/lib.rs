@@ -3,10 +3,12 @@
 //! Architecture: the React webview owns capture (getDisplayMedia + MediaRecorder)
 //! and the pure render planner; this Rust side owns the OS integration that a
 //! webview cannot do safely — SQLite persistence, running the locally-installed
-//! ffmpeg, cursor sampling, the system tray and the recording timer.
+//! ffmpeg, cursor sampling, the system tray, the recording timer and the
+//! opt-in Google Drive upload.
 
 mod capture;
 mod commands;
+mod drive;
 mod filename;
 mod media;
 mod session;
@@ -54,6 +56,10 @@ pub fn run() {
                 session: Session::new(),
                 cursor: CursorSampler::new(),
                 recordings_dir,
+                drive: drive::DrivePaths {
+                    client: data_dir.join("google-drive-client.json"),
+                    token: data_dir.join("google-drive.json"),
+                },
             });
 
             session::build_tray(app.handle())?;
@@ -86,6 +92,12 @@ pub fn run() {
             commands::save_project,
             commands::delete_project,
             commands::transcribe,
+            commands::drive_status,
+            commands::drive_save_client,
+            commands::drive_clear_client,
+            commands::drive_connect,
+            commands::drive_disconnect,
+            commands::drive_upload,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
