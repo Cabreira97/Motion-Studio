@@ -177,3 +177,11 @@ cargo build
 
 The TypeScript core is where the interesting logic lives and is covered by the
 test suite; the Rust layer is intentionally thin and validated.
+
+## Contributing
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[MIT](LICENSE)
