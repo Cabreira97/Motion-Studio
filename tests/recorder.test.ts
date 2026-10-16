@@ -6,6 +6,7 @@ import {
   hasMediaClusters,
   pickMimeType,
   preferredCaptureSize,
+  recorderSupported,
 } from "../src/lib/recorder.js";
 
 /** Replaces `MediaRecorder` with one that only supports `supported`. */
@@ -89,6 +90,30 @@ describe("evenSize", () => {
     // failure this whole file exists to avoid.
     expect(evenSize(0, 0)).toEqual({ width: 2, height: 2 });
     expect(evenSize(1, 1)).toEqual({ width: 2, height: 2 });
+  });
+});
+
+describe("recorderSupported", () => {
+  it("does not hold the native backend to webview APIs it never calls", () => {
+    // Nothing is defined on globalThis here: no navigator, no MediaRecorder.
+    // The native backend records in Rust, so demanding them would refuse to
+    // record on the one platform that needs it.
+    expect(recorderSupported("native")).toBe(true);
+  });
+
+  it("requires both capture and encoding for the webview backend", () => {
+    withSupportedTypes([]); // defines MediaRecorder, leaves navigator absent
+    expect(recorderSupported("webview")).toBe(false);
+
+    Object.defineProperty(globalThis, "navigator", {
+      value: { mediaDevices: { getDisplayMedia: () => {} } },
+      configurable: true,
+      writable: true,
+    });
+    expect(recorderSupported("webview")).toBe(true);
+
+    Reflect.deleteProperty(globalThis, "MediaRecorder");
+    expect(recorderSupported("webview")).toBe(false);
   });
 });
 

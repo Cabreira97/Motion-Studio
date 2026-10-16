@@ -19,7 +19,7 @@ mod native_capture;
 mod session;
 mod store;
 #[cfg(all(unix, not(target_os = "macos")))]
-mod webview_permissions;
+mod webview_linux;
 
 use std::sync::Mutex;
 
@@ -35,6 +35,12 @@ pub fn run() {
     for candidate in [".env", "../.env"] {
         let _ = dotenvy::from_filename(candidate);
     }
+
+    // Before the webview exists: WebKitGTK reads this when it builds its video
+    // playback pipeline, and without it the editor preview plays a recording
+    // and shows black. No-op elsewhere.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    webview_linux::prefer_software_video_sink();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -68,12 +74,6 @@ pub fn run() {
             });
 
             session::build_tray(app.handle())?;
-
-            // WebKitGTK denies capture unless the app answers its permission
-            // signal, so screen recording is dead on arrival on Linux without
-            // this. No-op elsewhere.
-            #[cfg(all(unix, not(target_os = "macos")))]
-            webview_permissions::install(app.handle())?;
 
             Ok(())
         })

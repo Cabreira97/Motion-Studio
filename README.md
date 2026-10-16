@@ -212,6 +212,11 @@ Windows and macOS keep recording in the webview with `getDisplayMedia` +
 `MediaRecorder`; the backend reports which recorder to drive, so the choice is
 never sniffed from a user agent.
 
+Playback needed one more thing: the app starts WebKitGTK with
+`WEBKIT_GST_DISABLE_GL_SINK=1`. Its GL video sink decodes a file correctly and
+never gets the pixels to compositing, so the editor preview played a recording
+and showed black. Set `WEBKIT_GST_DISABLE_GL_SINK=0` to see that for yourself.
+
 Cursor sampling needs **X11**: `libX11` is loaded at runtime (`dlopen`), so no
 X11 headers are needed to build and the binary still starts without X11.
 

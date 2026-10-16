@@ -260,14 +260,15 @@ export default function App() {
   const startRecording = useCallback(async () => {
     setRecWarning(null);
     try {
-      if (!recorderSupported()) {
-        throw new Error(t("error.captureUnsupported"));
-      }
-      setRecState("starting");
       // The backend decides who records. On Linux the webview cannot, so Rust
       // does it and writes the file itself; everywhere else this is the
       // webview recorder and nothing about the flow changes.
-      const recorder = createRecorder(caps?.videoBackend ?? "webview");
+      const backend = caps?.videoBackend ?? "webview";
+      if (!recorderSupported(backend)) {
+        throw new Error(t("error.captureUnsupported"));
+      }
+      setRecState("starting");
+      const recorder = createRecorder(backend);
       const name = timestampName("Recording", Date.now());
       await recorder.start({ kind, mic, fps: 30, name });
       recorderRef.current = recorder;

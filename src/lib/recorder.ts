@@ -212,7 +212,15 @@ export async function hasMediaClusters(blob: Blob): Promise<boolean> {
   return false;
 }
 
-export function recorderSupported(): boolean {
+/**
+ * Whether recording can start at all with the backend the Rust side reports.
+ *
+ * The native backend needs nothing from the webview — no `getDisplayMedia`, no
+ * `MediaRecorder`, not even a `MediaStream` — so checking for them there would
+ * refuse to record over APIs it never calls.
+ */
+export function recorderSupported(videoBackend: string): boolean {
+  if (videoBackend === "native") return true;
   return (
     typeof navigator !== "undefined" &&
     !!navigator.mediaDevices &&
@@ -238,7 +246,7 @@ export class ScreenRecorder implements Recorder {
   }
 
   async start(options: StartOptions): Promise<void> {
-    if (!recorderSupported()) {
+    if (!recorderSupported("webview")) {
       throw new Error(
         "Screen capture is not available in this environment. The desktop app (pnpm first-run) provides screen recording.",
       );
