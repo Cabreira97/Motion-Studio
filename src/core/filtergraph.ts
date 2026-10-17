@@ -20,7 +20,13 @@ export interface RenderPlan {
   trim: { startMs: number; endMs: number };
   crop: Rect;
   framing: Framing;
+  /** Keyframe times are clip-relative (0 = first frame after the trim). */
   zoom: { enabled: boolean; keyframes: ZoomKeyframe[] };
+  /**
+   * Cursor samples, also clip-relative. The overlay is drawn after
+   * `setpts=PTS-STARTPTS`, so a source-time track would drift by exactly the
+   * trim offset — use `toClipTime` before building a plan.
+   */
   cursor: { enabled: boolean; track: Point[] };
   cursorStyle: CursorStyle;
   callouts: Callout[];
@@ -28,8 +34,10 @@ export interface RenderPlan {
   outputPath: string;
   /** Absolute path to a `.ttf`/`.otf` used for callouts, if any. */
   fontFile?: string;
-  /** Optional path to a soft cursor-highlight PNG (input #1). */
+  /** Optional path to a soft cursor-highlight PNG. */
   cursorOverlayPath?: string;
+  /** Optional path to a rounded-corner wedge PNG (see `renderRoundedCornerMask`). */
+  cornerMaskPath?: string;
 }
 
 export interface BuiltGraph {
@@ -51,6 +59,98 @@ function isFullCrop(rect: Rect): boolean {
 function evenBelow(value: number, floor: number): number {
   const rounded = Math.floor(value / 2) * 2;
   return Math.max(floor, rounded);
+}
+
+/**
+ * Largest even size with the `src` aspect ratio that fits inside `box`.
+ *
+ * Computed here rather than delegated to `force_original_aspect_ratio=decrease`
+ * so the exact placement of the content inside the canvas is known at plan
+ * time — the rounded-corner overlays need to land on real pixel coordinates.
+ */
+export function fitInside(
+  srcW: number,
+  srcH: number,
+  boxW: number,
+  boxH: number,
+): { width: number; height: number } {
+  if (srcW <= 0 || srcH <= 0 || boxW <= 0 || boxH <= 0) {
+    return { width: Math.max(2, evenBelow(boxW, 2)), height: Math.max(2, evenBelow(boxH, 2)) };
+  }
+  const scale = Math.min(boxW / srcW, boxH / srcH);
+  return {
+    width: evenBelow(srcW * scale, 2),
+    height: evenBelow(srcH * scale, 2),
+  };
+}
+
+export interface StageLayout {
+  /** Output canvas in pixels, after the preset's height cap. */
+  out: { width: number; height: number };
+  /** The cropped region of the source, in source pixels. */
+  base: { width: number; height: number; x: number; y: number };
+  /** Where the content lands on the canvas, in canvas pixels. */
+  content: { width: number; height: number; x: number; y: number };
+  /** Corner radius actually applied, clamped to the content box. */
+  radiusPx: number;
+}
+
+/**
+ * Resolves every piece of the output frame to canvas pixels.
+ *
+ * {@link buildGraph} and the editor preview both go through here. They are two
+ * renderings of one geometry, and keeping the arithmetic in one place is the
+ * only thing stopping the preview from quietly disagreeing with the file.
+ */
+export function computeStageLayout(input: {
+  sourceWidth: number;
+  sourceHeight: number;
+  crop: Rect;
+  framing: Framing;
+  presetId: string;
+}): StageLayout {
+  const { framing } = input;
+  const out = resolveOutputSize(framing, getPreset(input.presetId));
+  const base = computeCropPixels(input.sourceWidth, input.sourceHeight, input.crop);
+  const fitted = fitInside(
+    base.width,
+    base.height,
+    evenBelow(out.width - framing.paddingPx * 2, 2),
+    evenBelow(out.height - framing.paddingPx * 2, 2),
+  );
+  return {
+    out,
+    base,
+    content: {
+      ...fitted,
+      x: evenBelow((out.width - fitted.width) / 2, 0),
+      y: evenBelow((out.height - fitted.height) / 2, 0),
+    },
+    radiusPx: Math.min(
+      Math.max(0, Math.round(framing.cornerRadiusPx)),
+      Math.floor(fitted.width / 2),
+      Math.floor(fitted.height / 2),
+    ),
+  };
+}
+
+/**
+ * The visible window of the cropped frame at a given zoom, in normalized crop
+ * coordinates. Mirrors the clamps in {@link zoompanExpr}, which keep the window
+ * inside the frame rather than letting a focus point near an edge pan off it.
+ */
+export function zoomWindow(
+  scale: number,
+  cx: number,
+  cy: number,
+): { scale: number; x: number; y: number } {
+  const z = Math.max(1, scale);
+  const span = 1 / z;
+  return {
+    scale: z,
+    x: clamp(cx - span / 2, 0, 1 - span),
+    y: clamp(cy - span / 2, 0, 1 - span),
+  };
 }
 
 /** Resolves a normalized crop rect to even pixel dimensions inside the source. */
@@ -118,6 +218,16 @@ export function escapeDrawtext(text: string): string {
 /** Escapes a filesystem path for an ffmpeg filter argument. */
 export function escapeFilterPath(path: string): string {
   return path.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+}
+
+/**
+ * Top-left of a callout box that is centred on `centerPx` and then pushed back
+ * inside the canvas. The same clamp is emitted symbolically by
+ * {@link buildCalloutFilters}, where the box size is only known to ffmpeg; here
+ * it is a measured number, which is what the preview has.
+ */
+export function clampTextBox(centerPx: number, boxPx: number, canvasPx: number): number {
+  return Math.max(0, Math.min(canvasPx - boxPx, centerPx - boxPx / 2));
 }
 
 function buildCalloutFilters(callouts: Callout[], framing: Framing): string[] {
@@ -205,17 +315,25 @@ export function buildGraph(plan: RenderPlan): BuiltGraph {
   const normalized = normalizeTrim(plan.trim, Number.MAX_SAFE_INTEGER, framing.fps);
   const startSec = toSeconds(normalized.startMs);
   const endSec = toSeconds(normalized.endMs);
-  const out = resolveOutputSize(framing, preset);
-
-  const cropPixels = computeCropPixels(plan.sourceWidth, plan.sourceHeight, crop);
+  const layout = computeStageLayout({
+    sourceWidth: plan.sourceWidth,
+    sourceHeight: plan.sourceHeight,
+    crop,
+    framing,
+    presetId: plan.presetId,
+  });
+  const out = layout.out;
+  const cropPixels = layout.base;
   const baseW = cropPixels.width;
   const baseH = cropPixels.height;
 
-  const contentW = evenBelow(out.width - framing.paddingPx * 2, 2);
-  const contentH = evenBelow(out.height - framing.paddingPx * 2, 2);
-
   const inputs: string[] = [plan.sourcePath];
   const filters: string[] = [];
+  /** Registers a still-image input and returns its ffmpeg stream index. */
+  const addImageInput = (path: string): number => {
+    inputs.push(path);
+    return inputs.length - 1;
+  };
 
   const baseParts = [
     `trim=start=${startSec}:end=${endSec}`,
@@ -231,12 +349,12 @@ export function buildGraph(plan: RenderPlan): BuiltGraph {
   const useCursor = plan.cursor.enabled && plan.cursor.track.length > 0 && !!plan.cursorOverlayPath;
 
   if (useCursor) {
-    inputs.push(plan.cursorOverlayPath!);
+    const cursorInput = addImageInput(plan.cursorOverlayPath!);
     const { x, y } = cursorPositionExpr(plan.cursor.track, crop, baseW, baseH);
     filters.push(`[0:v]${baseParts.join(",")}[base]`);
     const diameter = evenBelow(framing.outputHeight * plan.cursorStyle.radiusScale * 2, 8);
     filters.push(
-      `[1:v]scale=${diameter}:${diameter}:flags=bicubic,format=rgba,loop=loop=-1:size=1:start=0[cur]`,
+      `[${cursorInput}:v]scale=${diameter}:${diameter}:flags=bicubic,format=rgba,loop=loop=-1:size=1:start=0[cur]`,
     );
     const end = endSec;
     filters.push(
@@ -252,13 +370,38 @@ export function buildGraph(plan: RenderPlan): BuiltGraph {
     current = "zoomed";
   }
 
+  // Scale to an explicitly computed size (instead of letting ffmpeg decide via
+  // force_original_aspect_ratio) so the content's position inside the canvas is
+  // known here — the rounded-corner overlays below need exact coordinates.
+  const fitted = layout.content;
+  const offsetX = fitted.x;
+  const offsetY = fitted.y;
+  filters.push(`[${current}]scale=${fitted.width}:${fitted.height}:flags=lanczos,setsar=1[fit]`);
   filters.push(
-    `[${current}]scale=${contentW}:${contentH}:force_original_aspect_ratio=decrease:flags=lanczos,setsar=1[fit]`,
-  );
-  filters.push(
-    `[fit]pad=${out.width}:${out.height}:(ow-iw)/2:(oh-ih)/2:color=${framing.background}[padded]`,
+    `[fit]pad=${out.width}:${out.height}:${offsetX}:${offsetY}:color=${framing.background}[padded]`,
   );
   current = "padded";
+
+  // Rounded framing: paint four background-coloured wedges over the content
+  // corners. Masking the whole frame with `geq` instead measured ~5x slower
+  // than the entire rest of the render.
+  const radius = layout.radiusPx;
+  if (radius > 0 && plan.cornerMaskPath) {
+    const maskInput = addImageInput(plan.cornerMaskPath);
+    filters.push(
+      `[${maskInput}:v]scale=${radius}:${radius}:flags=bicubic,format=rgba,loop=loop=-1:size=1:start=0,split=4[tl][trRaw][blRaw][brRaw]`,
+    );
+    filters.push("[trRaw]hflip[tr]");
+    filters.push("[blRaw]vflip[bl]");
+    filters.push("[brRaw]hflip,vflip[br]");
+    const right = offsetX + fitted.width - radius;
+    const bottom = offsetY + fitted.height - radius;
+    filters.push(`[${current}][tl]overlay=${offsetX}:${offsetY}:shortest=1[corner1]`);
+    filters.push(`[corner1][tr]overlay=${right}:${offsetY}:shortest=1[corner2]`);
+    filters.push(`[corner2][bl]overlay=${offsetX}:${bottom}:shortest=1[corner3]`);
+    filters.push(`[corner3][br]overlay=${right}:${bottom}:shortest=1[rounded]`);
+    current = "rounded";
+  }
 
   const calloutFilters = plan.fontFile
     ? buildCalloutFilters(plan.callouts, {
@@ -270,7 +413,7 @@ export function buildGraph(plan: RenderPlan): BuiltGraph {
   if (calloutFilters.length > 0) {
     const fontArg = `:fontfile='${escapeFilterPath(plan.fontFile!)}'`;
     const chain = calloutFilters.map((f) => `${f}${fontArg}`).join(",");
-    filters.push(`[padded]${chain}[withtext]`);
+    filters.push(`[${current}]${chain}[withtext]`);
     current = "withtext";
   }
 
@@ -302,9 +445,10 @@ export function buildRenderArgs(plan: RenderPlan): string[] {
     "-i",
     plan.sourcePath,
   ];
-  if (graph.inputPaths.length > 1) {
-    // Looped still image for the cursor highlight.
-    args.push("-loop", "1", "-i", graph.inputPaths[1]!);
+  // Every extra input is a still image (cursor highlight, corner wedge) that
+  // must loop for the whole clip; the output `-t` below bounds the render.
+  for (const imagePath of graph.inputPaths.slice(1)) {
+    args.push("-loop", "1", "-i", imagePath);
   }
   args.push(
     "-filter_complex",

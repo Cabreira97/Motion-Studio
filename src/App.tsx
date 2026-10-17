@@ -5,17 +5,19 @@ import {
   createTauriPorts,
   isTauri,
   listen,
-  toAssetUrl,
+  toMediaUrl,
   type AppInfo,
   type CaptureCapabilities,
   type DriveProgress,
   type DriveStatus,
+  type TickPayload,
 } from "./lib/bridge.js";
-import { ScreenRecorder, recorderSupported } from "./lib/recorder.js";
+import { createRecorder, recorderSupported, type Recorder } from "./lib/recorder.js";
 import { loadProjects, persistProject, removeProject } from "./lib/projects.js";
 import { LANGUAGES, useI18n, type Lang, type TranslationKey } from "./lib/i18n.js";
 import { CalloutEditor } from "./components/CalloutEditor.js";
 import { DriveButton, DriveSection, DriveSetupView, type DriveProps } from "./components/Drive.js";
+import { EditStage } from "./components/EditStage.js";
 import { SourcePicker } from "./components/SourcePicker.js";
 import { RecordingBanner, TimerText } from "./components/Timer.js";
 import {
@@ -28,16 +30,21 @@ import { EXPORT_PRESETS } from "./core/presets.js";
 import { exportArtifacts, runExport } from "./core/pipeline.js";
 import {
   addExport,
+  addZoomStop,
   createProject,
+  removeZoomStop,
   summarizeTrim,
   timestampName,
+  updateZoomStop,
   withCrop,
   withPreset,
   withTrim,
-  withAutoZoom,
   withExportDriveUrl,
+  withZoomMode,
+  withZoomTimeline,
 } from "./core/project.js";
 import { formatDuration } from "./core/time.js";
+import { MAX_ZOOM_SCALE, MIN_STOP_MS, MIN_ZOOM_SCALE } from "./core/zoom.js";
 import type {
   Callout,
   CaptureKind,
@@ -99,7 +106,7 @@ export default function App() {
   const [driveError, setDriveError] = useState<string | null>(null);
   const [driveUploads, setDriveUploads] = useState<Record<string, number>>({});
 
-  const recorderRef = useRef<ScreenRecorder | null>(null);
+  const recorderRef = useRef<Recorder | null>(null);
   const stoppingRef = useRef(false);
   const timerRef = useRef<number | null>(null);
   const projectsRef = useRef<Project[]>([]);
@@ -176,6 +183,14 @@ export default function App() {
       }
       const result = await recorder.stop();
 
+      // The recorder's own track wins where it has one. On Wayland the OS
+      // sampler cannot see the pointer at all — no client can — so the only
+      // positions that exist come from the capture stream, and they are already
+      // timestamped against the file that was just written.
+      if (result.cursorTrack) {
+        cursorTrack = result.cursorTrack.map((s) => ({ t: s.t, x: s.x, y: s.y }));
+      }
+
       let sourcePath = "";
       let sourceWidth = result.width;
       let sourceHeight = result.height;
@@ -183,22 +198,30 @@ export default function App() {
       let fps = 30;
       let hasAudio = result.hasAudio;
 
-      const bytes = new Uint8Array(await result.blob.arrayBuffer());
-
-      if (isTauri()) {
-        const name = timestampName("Recording", Date.now());
-        const saved = await bridge.saveRecording(name, bytes);
+      if (result.path) {
+        // The native backend already wrote the file. Sending the bytes back
+        // through the bridge only to write them out again would copy a whole
+        // recording through JSON for nothing.
+        sourcePath = result.path;
+      } else if (result.blob && isTauri()) {
+        const bytes = new Uint8Array(await result.blob.arrayBuffer());
+        const saved = await bridge.saveRecording(timestampName("Recording", Date.now()), bytes);
         sourcePath = saved.path;
-        const info = await bridge.probeMedia(saved.path);
+      }
+
+      if (sourcePath && isTauri()) {
+        // Read the real numbers off the file rather than trusting what the
+        // recorder reported: this is what the editor and the export act on.
+        const info = await bridge.probeMedia(sourcePath);
         sourceWidth = info.width || sourceWidth;
         sourceHeight = info.height || sourceHeight;
         durationMs = info.durationMs || durationMs;
         fps = info.fps || fps;
         hasAudio = info.hasAudio;
-        setPreviewUrl(await toAssetUrl(saved.path));
-      } else {
-        setPreviewUrl(URL.createObjectURL(result.blob));
+        setPreviewUrl(await toMediaUrl(sourcePath));
+      } else if (result.blob) {
         sourcePath = URL.createObjectURL(result.blob);
+        setPreviewUrl(sourcePath);
       }
 
       const project = createProject({
@@ -244,7 +267,9 @@ export default function App() {
   useEffect(() => {
     if (!isTauri()) return;
     const disposers: Array<() => void> = [];
-    void listen<number>("recording://tick", (ms) => setElapsedMs(ms)).then((d) => disposers.push(d));
+    void listen<TickPayload>("recording://tick", (tick) => setElapsedMs(tick.elapsedMs)).then((d) =>
+      disposers.push(d),
+    );
     void listen<null>("recording://stop-requested", () => void handleStop()).then((d) =>
       disposers.push(d),
     );
@@ -262,12 +287,17 @@ export default function App() {
   const startRecording = useCallback(async () => {
     setRecWarning(null);
     try {
-      if (!recorderSupported()) {
+      // The backend decides who records. On Linux the webview cannot, so Rust
+      // does it and writes the file itself; everywhere else this is the
+      // webview recorder and nothing about the flow changes.
+      const backend = caps?.videoBackend ?? "webview";
+      if (!recorderSupported(backend)) {
         throw new Error(t("error.captureUnsupported"));
       }
       setRecState("starting");
-      const recorder = new ScreenRecorder();
-      await recorder.start({ kind, mic, fps: 30 });
+      const recorder = createRecorder(backend);
+      const name = timestampName("Recording", Date.now());
+      await recorder.start({ kind, mic, fps: 30, name });
       recorderRef.current = recorder;
       setElapsedMs(0);
       if (isTauri()) {
@@ -280,7 +310,7 @@ export default function App() {
       setRecState("idle");
       setRecWarning(errMessage(error));
     }
-  }, [kind, mic, t]);
+  }, [caps, kind, mic, t]);
 
   const commit = useCallback((next: Project) => {
     setProjects((prev) => prev.map((p) => (p.id === next.id ? next : p)));
@@ -484,7 +514,7 @@ export default function App() {
               if (project?.source?.path) {
                 const sourcePath = project.source.path;
                 if (isTauri()) {
-                  void toAssetUrl(sourcePath).then(setPreviewUrl).catch(() => setPreviewUrl(null));
+                  void toMediaUrl(sourcePath).then(setPreviewUrl).catch(() => setPreviewUrl(null));
                 } else {
                   setPreviewUrl(sourcePath);
                 }
@@ -550,8 +580,20 @@ export default function App() {
             onChange={commit}
             onExport={() => void handleExport()}
             onBack={() => setView("library")}
-            onReveal={(path) => void bridge.revealPath(path).catch(() => {})}
-            onCopy={(path) => void bridge.copyPath(path).catch(() => {})}
+            onReveal={(path) =>
+              void bridge
+                .revealPath(path)
+                .catch((error) =>
+                  setExportError(t("error.revealFailed", { message: errMessage(error) })),
+                )
+            }
+            onCopy={(path) =>
+              void bridge
+                .copyPath(path)
+                .catch((error) =>
+                  setExportError(t("error.copyFailed", { message: errMessage(error) })),
+                )
+            }
           />
         )}
 
@@ -681,6 +723,26 @@ function EditView({
   const durationMs = project.source?.durationMs ?? 0;
   const clipMs = Math.max(0, project.trim.endMs - project.trim.startMs);
 
+  // Manual zoom is authored against the preview: the playhead gives the time,
+  // clicking the frame gives the focus point.
+  const [playheadMs, setPlayheadMs] = useState(0);
+  const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
+  const stops = project.zoom.stops;
+  const manualZoom = project.zoom.mode === "manual";
+  const selectedStop = stops.find((s) => s.id === selectedStopId) ?? null;
+  const pickingFocus = manualZoom && selectedStop !== null;
+
+  const addStopAtPlayhead = () => {
+    const id = `zs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    setSelectedStopId(id);
+    onChange(addZoomStop(project, { id, t: playheadMs }));
+  };
+
+  // The stage drives the playhead from a `requestAnimationFrame` loop, so this
+  // has to keep its identity or the loop restarts on every frame.
+  const onPlayheadMs = useCallback((ms: number) => setPlayheadMs(ms), []);
+  const clearFocus = useCallback(() => setSelectedStopId(null), []);
+
   const setFraming = (patch: Partial<Framing>) =>
     onChange({ ...project, framing: { ...project.framing, ...patch } });
 
@@ -707,30 +769,20 @@ function EditView({
 
       <div className="edit__layout">
         <div className="edit__preview">
-          <div
-            className="stage"
-            style={{
-              aspectRatio: `${project.framing.outputWidth} / ${project.framing.outputHeight}`,
-              background: project.framing.background,
-              padding: `${(project.framing.paddingPx / project.framing.outputHeight) * 100}%`,
-            }}
-          >
-            {previewUrl ? (
-              <video className="stage__video" src={previewUrl} controls preload="metadata" />
-            ) : (
-              <div className="stage__placeholder">{t("edit.previewPlaceholder")}</div>
-            )}
-            <div
-              className="stage__crop"
-              style={{
-                left: `${project.crop.x * 100}%`,
-                top: `${project.crop.y * 100}%`,
-                width: `${project.crop.width * 100}%`,
-                height: `${project.crop.height * 100}%`,
-                borderRadius: project.framing.cornerRadiusPx,
-              }}
-            />
-          </div>
+          <EditStage
+            project={project}
+            previewUrl={previewUrl}
+            playheadMs={playheadMs}
+            onPlayheadMs={onPlayheadMs}
+            focusStop={pickingFocus ? selectedStop : null}
+            onFocus={(cx, cy) =>
+              selectedStop && onChange(updateZoomStop(project, selectedStop.id, { cx, cy }))
+            }
+            onFocusDone={clearFocus}
+            onMoveCallout={(id, x, y) =>
+              setCallouts(project.callouts.map((c) => (c.id === id ? { ...c, x, y } : c)))
+            }
+          />
           <p className="muted">
             {t("edit.summary", {
               summary: summarizeTrim(project),
@@ -786,23 +838,129 @@ function EditView({
                 type="checkbox"
                 checked={project.zoom.enabled}
                 onChange={(e) =>
-                  onChange(withAutoZoom({ ...project, zoom: { ...project.zoom, enabled: e.target.checked } }))
+                  onChange(
+                    withZoomTimeline({
+                      ...project,
+                      zoom: { ...project.zoom, enabled: e.target.checked },
+                    }),
+                  )
                 }
               />
-              <span>{t("edit.zoomFollow")}</span>
+              <span>{t("edit.zoomEnabled")}</span>
             </label>
-            <label>
-              <span>{t("edit.zoomIntensity", { percent: Math.round(project.zoom.intensity * 100) })}</span>
-              <input
-                type="range"
-                min={0.1}
-                max={1}
-                step={0.05}
-                value={project.zoom.intensity}
-                disabled={!project.zoom.enabled}
-                onChange={(e) => onChange(withAutoZoom(project, Number(e.target.value)))}
-              />
-            </label>
+
+            <div className="seg" role="group" aria-label={t("edit.zoomMode")}>
+              {(["auto", "manual"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={`seg__btn${project.zoom.mode === mode ? " seg__btn--on" : ""}`}
+                  disabled={!project.zoom.enabled}
+                  onClick={() => onChange(withZoomMode(project, mode))}
+                >
+                  {t(mode === "auto" ? "edit.zoomModeAuto" : "edit.zoomModeManual")}
+                </button>
+              ))}
+            </div>
+
+            {manualZoom ? (
+              <>
+                <p className="muted">{t("edit.zoomManualHint")}</p>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  disabled={!project.zoom.enabled}
+                  onClick={addStopAtPlayhead}
+                >
+                  {t("edit.zoomAddStop", { time: formatDuration(playheadMs) })}
+                </button>
+
+                {stops.length === 0 ? (
+                  <p className="muted">{t("edit.zoomNoStops")}</p>
+                ) : (
+                  <ul className="stops">
+                    {stops.map((stop) => (
+                      <li
+                        key={stop.id}
+                        className={`stops__item${stop.id === selectedStopId ? " stops__item--on" : ""}`}
+                      >
+                        <div className="row row--between">
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() => setSelectedStopId(stop.id)}
+                          >
+                            {t("edit.zoomStopLabel", {
+                              time: formatDuration(stop.t),
+                              scale: stop.scale.toFixed(1),
+                            })}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() => {
+                              if (stop.id === selectedStopId) setSelectedStopId(null);
+                              onChange(removeZoomStop(project, stop.id));
+                            }}
+                          >
+                            {t("edit.zoomRemoveStop")}
+                          </button>
+                        </div>
+                        <label>
+                          <span>{t("edit.zoomStopScale", { scale: stop.scale.toFixed(2) })}</span>
+                          <input
+                            type="range"
+                            min={MIN_ZOOM_SCALE}
+                            max={MAX_ZOOM_SCALE}
+                            step={0.05}
+                            value={stop.scale}
+                            onChange={(e) =>
+                              onChange(
+                                updateZoomStop(project, stop.id, { scale: Number(e.target.value) }),
+                              )
+                            }
+                          />
+                        </label>
+                        <label>
+                          <span>
+                            {t("edit.zoomStopDuration", { time: formatDuration(stop.durationMs) })}
+                          </span>
+                          <input
+                            type="range"
+                            min={MIN_STOP_MS}
+                            max={Math.max(MIN_STOP_MS, clipMs)}
+                            step={100}
+                            value={stop.durationMs}
+                            onChange={(e) =>
+                              onChange(
+                                updateZoomStop(project, stop.id, {
+                                  durationMs: Number(e.target.value),
+                                }),
+                              )
+                            }
+                          />
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            ) : (
+              <label>
+                <span>
+                  {t("edit.zoomIntensity", { percent: Math.round(project.zoom.intensity * 100) })}
+                </span>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  value={project.zoom.intensity}
+                  disabled={!project.zoom.enabled}
+                  onChange={(e) => onChange(withZoomTimeline(project, Number(e.target.value)))}
+                />
+              </label>
+            )}
             <label className="toggle">
               <input
                 type="checkbox"
@@ -817,6 +975,12 @@ function EditView({
               <span>{t("edit.zoomHighlight")}</span>
             </label>
             <p className="muted">{t("edit.zoomKeyframes", { count: project.zoom.keyframes.length })}</p>
+            {/* Auto-zoom silently produces nothing without a cursor track —
+                most often on Wayland, which does not report the global cursor
+                position. Say so, and point at the mode that does work. */}
+            {project.zoom.enabled && !manualZoom && project.cursorTrack.length === 0 && (
+              <p className="warn-text">{t("edit.zoomNoCursorTrack")}</p>
+            )}
           </div>
 
           {/* Crop */}

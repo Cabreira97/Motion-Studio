@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Motion Studio: a personal, local-first screen recorder that auto-zooms on the cursor, trims, and exports shareable videos.",
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "bootstrap": "node scripts/bootstrap.mjs",
     "first-run": "node scripts/bootstrap.mjs && tauri dev",

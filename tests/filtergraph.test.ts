@@ -4,10 +4,14 @@ import {
   buildRenderArgs,
   buildZoomExpression,
   choosePosterTime,
+  clampTextBox,
   computeCropPixels,
+  computeStageLayout,
   escapeDrawtext,
   escapeFilterPath,
   buildGraph,
+  fitInside,
+  zoomWindow,
   type RenderPlan,
 } from "../src/core/filtergraph.js";
 import { getPreset, presetCodecArgs, resolveOutputSize, EXPORT_PRESETS } from "../src/core/presets.js";
@@ -57,6 +61,29 @@ describe("computeCropPixels", () => {
     const pixels = computeCropPixels(1000, 500, { x: 2, y: -1, width: 2, height: 2 });
     expect(pixels.width).toBeLessThanOrEqual(1000);
     expect(pixels.x).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("fitInside", () => {
+  it("keeps the source aspect ratio and returns even sizes", () => {
+    const fitted = fitInside(1920, 1080, 1792, 1008);
+    expect(fitted).toEqual({ width: 1792, height: 1008 });
+  });
+
+  it("fits a portrait source inside a landscape box", () => {
+    const fitted = fitInside(1080, 1920, 1792, 1008);
+    expect(fitted.height).toBeLessThanOrEqual(1008);
+    expect(fitted.width).toBeLessThanOrEqual(1792);
+    expect(fitted.width % 2).toBe(0);
+    expect(fitted.height % 2).toBe(0);
+    // 1080/1920 = 0.5625 aspect kept within a pixel of rounding.
+    expect(fitted.width / fitted.height).toBeCloseTo(1080 / 1920, 2);
+  });
+
+  it("never exceeds the box and degrades safely on bad input", () => {
+    const fitted = fitInside(0, 0, 100, 50);
+    expect(fitted.width).toBeGreaterThan(0);
+    expect(fitted.height).toBeGreaterThan(0);
   });
 });
 
@@ -174,6 +201,85 @@ describe("buildGraph", () => {
     expect(graph.filterComplex).toContain("overlay=");
   });
 
+  it("skips rounded corners when no mask was rendered", () => {
+    // Default framing has a 12px radius, but without a mask path there is
+    // nothing to overlay — the graph must stay valid rather than reference a
+    // missing input.
+    const graph = buildGraph(plan());
+    expect(graph.inputPaths).toHaveLength(1);
+    expect(graph.filterComplex).toContain("[padded]format=");
+  });
+
+  it("overlays four wedges on the content corners when a mask is given", () => {
+    const graph = buildGraph(plan({ cornerMaskPath: "/tmp/corner.png" }));
+    expect(graph.inputPaths).toEqual(["/tmp/in.mp4", "/tmp/corner.png"]);
+    expect(graph.filterComplex).toContain("split=4[tl][trRaw][blRaw][brRaw]");
+    expect(graph.filterComplex).toContain("[trRaw]hflip[tr]");
+    expect(graph.filterComplex).toContain("[blRaw]vflip[bl]");
+    expect(graph.filterComplex).toContain("[brRaw]hflip,vflip[br]");
+    // 1920x1080 fitted into the 1792x952 content box becomes 1692x952 at
+    // offset 114,64 — the wedges sit there and at (offset + size - radius).
+    expect(graph.filterComplex).toContain("[tl]overlay=114:64");
+    expect(graph.filterComplex).toContain("[br]overlay=1794:1004");
+    expect(graph.filterComplex).toContain("[rounded]format=");
+  });
+
+  it("gives the corner mask its own input index alongside the cursor sprite", () => {
+    const graph = buildGraph(
+      plan({
+        cornerMaskPath: "/tmp/corner.png",
+        cursorOverlayPath: "/tmp/cursor.png",
+        cursorStyle: { highlight: true, radiusScale: 0.06, smoothingMs: 450, zoomFollow: true },
+        cursor: { enabled: true, track: [{ t: 0, x: 0.5, y: 0.5 }, { t: 1000, x: 0.6, y: 0.4 }] },
+      }),
+    );
+    expect(graph.inputPaths).toEqual(["/tmp/in.mp4", "/tmp/cursor.png", "/tmp/corner.png"]);
+    // Cursor is input 1, mask is input 2 — neither may be hardcoded.
+    expect(graph.filterComplex).toContain("[1:v]scale=");
+    expect(graph.filterComplex).toContain("[2:v]scale=");
+  });
+
+  it("chains callouts after the rounded corners, not before them", () => {
+    const graph = buildGraph(
+      plan({
+        cornerMaskPath: "/tmp/corner.png",
+        fontFile: "/usr/share/fonts/x.ttf",
+        callouts: [
+          {
+            id: "1",
+            t: 0,
+            durationMs: 500,
+            x: 0.5,
+            y: 0.5,
+            text: "hi",
+            fontSize: 24,
+            color: "#ffffff",
+            boxColor: "#000000@0.8",
+          },
+        ],
+      }),
+    );
+    // `[padded]` is consumed by the first corner overlay; reusing it here would
+    // make ffmpeg reject the graph with a duplicate-label error.
+    expect(graph.filterComplex).toContain("[rounded]drawtext=");
+    expect(graph.filterComplex).toContain("[withtext]format=");
+  });
+
+  it("treats the cursor track as clip-relative", () => {
+    // A track already rebased by `toClipTime` starts at 0 even though the trim
+    // starts at 1s; the overlay expression must not re-add the trim offset.
+    const graph = buildGraph(
+      plan({
+        trim: { startMs: 1000, endMs: 3000 },
+        cursorOverlayPath: "/tmp/cursor.png",
+        cursorStyle: { highlight: true, radiusScale: 0.06, smoothingMs: 450, zoomFollow: true },
+        cursor: { enabled: true, track: [{ t: 0, x: 0.2, y: 0.2 }, { t: 1000, x: 0.8, y: 0.8 }] },
+      }),
+    );
+    expect(graph.filterComplex).toContain("lt(t,1)");
+    expect(graph.filterComplex).not.toContain("lt(t,2)");
+  });
+
   it("escapes callout text and requires a font", () => {
     const graph = buildGraph(
       plan({
@@ -234,5 +340,84 @@ describe("poster + probe helpers", () => {
     const args = buildProbeArgs("/tmp/out.mp4");
     expect(args[0]).toBe("ffprobe");
     expect(args[args.length - 1]).toBe("/tmp/out.mp4");
+  });
+});
+
+describe("stage layout shared with the preview", () => {
+  it("places the content centred inside the padding", () => {
+    const layout = computeStageLayout({
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      crop: { x: 0, y: 0, width: 1, height: 1 },
+      framing: { ...DEFAULT_FRAMING, paddingPx: 48 },
+      presetId: "mp4-1080p",
+    });
+    expect(layout.out).toEqual({ width: 1920, height: 1080 });
+    // 1920x1080 inside a 1824x984 box is height-bound.
+    expect(layout.content.height).toBe(984);
+    expect(layout.content.x).toBe((1920 - layout.content.width) / 2);
+    expect(layout.content.y).toBe(48);
+  });
+
+  it("clamps the corner radius to half the content box", () => {
+    const layout = computeStageLayout({
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      crop: { x: 0, y: 0, width: 1, height: 0.05 },
+      framing: { ...DEFAULT_FRAMING, cornerRadiusPx: 400 },
+      presetId: "mp4-1080p",
+    });
+    expect(layout.radiusPx).toBe(Math.floor(layout.content.height / 2));
+  });
+
+  it("is the same geometry the graph is built from", () => {
+    const p = plan({
+      crop: { x: 0.1, y: 0.2, width: 0.6, height: 0.5 },
+      framing: { ...DEFAULT_FRAMING, paddingPx: 32 },
+    });
+    const layout = computeStageLayout({
+      sourceWidth: p.sourceWidth,
+      sourceHeight: p.sourceHeight,
+      crop: p.crop,
+      framing: p.framing,
+      presetId: p.presetId,
+    });
+    const graph = buildGraph(p).filterComplex;
+    expect(graph).toContain(
+      `crop=${layout.base.width}:${layout.base.height}:${layout.base.x}:${layout.base.y}`,
+    );
+    expect(graph).toContain(`scale=${layout.content.width}:${layout.content.height}`);
+    expect(graph).toContain(
+      `pad=${layout.out.width}:${layout.out.height}:${layout.content.x}:${layout.content.y}`,
+    );
+  });
+});
+
+describe("zoom window", () => {
+  it("never goes below 1, matching the zoompan clamp", () => {
+    expect(zoomWindow(0.4, 0.5, 0.5)).toEqual({ scale: 1, x: 0, y: 0 });
+  });
+
+  it("centres the window on the focus point", () => {
+    expect(zoomWindow(2, 0.5, 0.5)).toEqual({ scale: 2, x: 0.25, y: 0.25 });
+  });
+
+  it("keeps the window inside the frame when the focus is at an edge", () => {
+    expect(zoomWindow(2, 0, 1)).toEqual({ scale: 2, x: 0, y: 0.5 });
+  });
+});
+
+describe("callout box clamping", () => {
+  it("centres a box that fits", () => {
+    expect(clampTextBox(500, 100, 1000)).toBe(450);
+  });
+
+  it("pushes a box back inside both edges", () => {
+    expect(clampTextBox(0, 100, 1000)).toBe(0);
+    expect(clampTextBox(1000, 100, 1000)).toBe(900);
+  });
+
+  it("pins a box wider than the canvas to the left edge, as drawtext does", () => {
+    expect(clampTextBox(500, 1200, 1000)).toBe(0);
   });
 });

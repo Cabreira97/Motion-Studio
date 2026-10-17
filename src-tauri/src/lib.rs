@@ -1,18 +1,28 @@
 //! Motion Studio — Tauri entry point.
 //!
-//! Architecture: the React webview owns capture (getDisplayMedia + MediaRecorder)
-//! and the pure render planner; this Rust side owns the OS integration that a
-//! webview cannot do safely — SQLite persistence, running the locally-installed
-//! ffmpeg, cursor sampling, the system tray, the recording timer and the
-//! opt-in Google Drive upload.
+//! Architecture: the React webview owns the pure render planner; this Rust side
+//! owns the OS integration a webview cannot do safely — SQLite persistence,
+//! running the locally-installed ffmpeg, cursor sampling, the system tray, the
+//! recording timer and the opt-in Google Drive upload.
+//!
+//! Capture is split by platform. On Windows and macOS the webview records it
+//! with `getDisplayMedia` + `MediaRecorder`. On Linux/BSD it cannot: WebKitGTK
+//! hands out display frames that encode to nothing and read back black, so
+//! capture is native there — see src/native_capture.rs.
 
 mod capture;
 mod commands;
 mod drive;
 mod filename;
 mod media;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod media_server;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod native_capture;
 mod session;
 mod store;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod webview_linux;
 
 use std::sync::Mutex;
 
@@ -28,6 +38,12 @@ pub fn run() {
     for candidate in [".env", "../.env"] {
         let _ = dotenvy::from_filename(candidate);
     }
+
+    // Before the webview exists: WebKitGTK reads this when it builds its video
+    // playback pipeline, and without it the editor preview plays a recording
+    // and shows black. No-op elsewhere.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    webview_linux::prefer_software_video_sink();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -51,6 +67,18 @@ pub fn run() {
             let store = Store::open(&data_dir.join("motion-studio.sqlite"))
                 .map_err(std::io::Error::other)?;
 
+            // The preview cannot read recordings through the asset protocol on
+            // Linux; see src/media_server.rs. Losing the server costs the
+            // preview, not the app, so a failure here only warns.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let media_server = match media_server::MediaServer::start(recordings_dir.clone()) {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    log::warn!("preview media server did not start: {error}");
+                    None
+                }
+            };
+
             app.manage(AppState {
                 store: Mutex::new(store),
                 session: Session::new(),
@@ -60,6 +88,10 @@ pub fn run() {
                     client: data_dir.join("google-drive-client.json"),
                     token: data_dir.join("google-drive.json"),
                 },
+                #[cfg(all(unix, not(target_os = "macos")))]
+                native_capture: Mutex::new(None),
+                #[cfg(all(unix, not(target_os = "macos")))]
+                media_server,
             });
 
             session::build_tray(app.handle())?;
@@ -69,8 +101,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_app_info,
             commands::capture_capabilities,
+            commands::native_capture_start,
+            commands::native_capture_stop,
             commands::run_ffmpeg,
             commands::probe_media,
+            commands::media_url,
             commands::resolve_recording_path,
             commands::save_recording,
             commands::write_text_file,

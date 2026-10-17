@@ -69,7 +69,49 @@ export interface CaptureCapabilities {
   region: boolean;
   microphone: boolean;
   cursorSampling: boolean;
+  /** Why cursor sampling is unavailable, when it is (Wayland, no DISPLAY, …). */
+  cursorNote: string | null;
   backend: string;
+  /**
+   * Which recorder the frontend should drive.
+   *
+   * `"webview"` records with `getDisplayMedia` + `MediaRecorder` and hands back
+   * a blob to save. `"native"` is used on Linux, where the webview cannot
+   * capture at all — WebKitGTK's display frames encode to nothing and read back
+   * black — so Rust records through xdg-desktop-portal and writes the file
+   * itself, and there is no blob.
+   */
+  videoBackend: "native" | "webview";
+}
+
+/** One recorded pointer position (mirrors the Rust `CursorSample`). */
+export interface CursorSample {
+  /** Milliseconds from the start of the recording. */
+  t: number;
+  /** Normalized 0..1 within the captured picture. */
+  x: number;
+  y: number;
+}
+
+/** A recording the native backend has already written (mirrors `NativeRecording`). */
+export interface NativeRecording {
+  path: string;
+  width: number;
+  height: number;
+  /** Frames written to the encoder: duration times frame rate. */
+  frames: number;
+  /** Frames the compositor delivered; zero means nothing was captured. */
+  delivered: number;
+  hasAudio: boolean;
+  /**
+   * Where the pointer was, from the capture stream itself.
+   *
+   * This is the only cursor source on Wayland, where no application can read
+   * the global pointer position — the portal reports it per frame instead.
+   * Empty when the portal would not report it, and then the OS sampler's track
+   * is used instead.
+   */
+  cursor: CursorSample[];
 }
 
 export interface ProcessOutput {
@@ -115,6 +157,11 @@ export interface DriveProgress {
 export const bridge = {
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
   captureCapabilities: () => invoke<CaptureCapabilities>("capture_capabilities"),
+  // Resolves only once the portal picker has been answered and the first frame
+  // has arrived, so a resolved promise means a recording really is under way.
+  nativeCaptureStart: (kind: string, fps: number, mic: boolean, name: string) =>
+    invoke<string>("native_capture_start", { kind, fps, mic, name }),
+  nativeCaptureStop: () => invoke<NativeRecording>("native_capture_stop"),
   probeMedia: (path: string) => invoke<MediaInfo>("probe_media", { path }),
   runFfmpeg: (args: string[]) => invoke<ProcessOutput>("run_ffmpeg", { args }),
   resolveRecordingPath: (name: string) =>
@@ -136,7 +183,7 @@ export const bridge = {
   sessionState: () => invoke<SessionState>("session_state"),
   cursorStart: (intervalMs?: number) =>
     invoke<void>("cursor_start", { intervalMs: intervalMs ?? null }),
-  cursorStop: () => invoke<Array<{ t: number; x: number; y: number }>>("cursor_stop"),
+  cursorStop: () => invoke<CursorSample[]>("cursor_stop"),
   listProjects: () => invoke<ProjectRow[]>("list_projects"),
   getProject: (id: string) => invoke<ProjectRow | null>("get_project", { id }),
   saveProject: (project: Project) =>
@@ -172,6 +219,18 @@ interface RustTranscript {
   text: string;
 }
 
+/**
+ * Payload of `recording://tick`, mirroring `TickPayload` in `session.rs`.
+ *
+ * Declared here rather than inline at the listener so there is one statement of
+ * the shape: `listen` takes the payload type on trust, so writing `number` for
+ * an object compiles cleanly and fails only at runtime, where it looks like a
+ * frozen clock rather than a type error.
+ */
+export interface TickPayload {
+  elapsedMs: number;
+}
+
 export async function listen<T>(
   event: string,
   handler: (payload: T) => void,
@@ -183,11 +242,18 @@ export async function listen<T>(
 }
 
 /**
- * Converts a local file path into a URL the webview can load. Falls back to the
- * path unchanged in the browser where there is no asset protocol.
+ * Converts a local file path into a URL the webview can play.
+ *
+ * The asset protocol is the usual answer and the one Windows and macOS use.
+ * WebKitGTK will not play media from it — a `<video>` on `asset://` fails with
+ * MEDIA_ERR_SRC_NOT_SUPPORTED even though the scheme handler answers — so on
+ * Linux the Rust side hands back a loopback HTTP URL instead. Falls back to the
+ * path unchanged in the browser, where there is no asset protocol at all.
  */
-export async function toAssetUrl(path: string): Promise<string> {
+export async function toMediaUrl(path: string): Promise<string> {
   if (!isTauri()) return path;
+  const served = await invoke<string | null>("media_url", { path });
+  if (served) return served;
   const { convertFileSrc } = await import("@tauri-apps/api/core");
   return convertFileSrc(path);
 }

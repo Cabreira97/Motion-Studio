@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Motion Studio. A screen, a replay arrow over it, and a record dot inside:
+       capture, then edit what you captured. Source of truth for the app icons —
+       regenerate the PNG/ICO/ICNS set with `npx tauri icon src-tauri/icons/icon.svg`. -->
+  <title>Motion Studio</title>
+  <g fill="none" stroke="#3B5BF5" stroke-width="70" stroke-linecap="round" stroke-linejoin="round">
+    <!-- The screen being recorded. -->
+    <rect x="159" y="353" width="619" height="467" rx="92" />
+    <!-- Replay: an arc over the screen, ending in the arrowhead below. -->
+    <path d="M 396 297 A 279 279 0 0 1 878 402" />
+  </g>
+  <!-- Arrowhead. Drawn filled rather than as a marker so its corners round the
+       same way the strokes do. -->
+  <path d="M 826 427 L 950 427 L 888 535 Z" fill="#3B5BF5" stroke="#3B5BF5"
+        stroke-width="26" stroke-linejoin="round" />
+  <!-- Record indicator. -->
+  <circle cx="291" cy="690" r="70" fill="#F4484F" />
+</svg>

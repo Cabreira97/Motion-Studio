@@ -1,4 +1,5 @@
 import { bridge, isTauri, type ProjectRow } from "./bridge.js";
+import { migrateProject } from "../core/project.js";
 import type { Project } from "../core/types.js";
 
 /**
@@ -22,7 +23,7 @@ function readLocal(): Project[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as StorageShape;
     if (parsed.version !== SCHEMA_VERSION) return [];
-    return Array.isArray(parsed.projects) ? parsed.projects : [];
+    return Array.isArray(parsed.projects) ? parsed.projects.map(migrateProject) : [];
   } catch {
     return [];
   }
@@ -36,7 +37,9 @@ function writeLocal(projects: Project[]): void {
 
 function parseRow(row: ProjectRow): Project | null {
   try {
-    return JSON.parse(row.data) as Project;
+    // Documents written by older builds lack newer fields; fill them in here
+    // so every consumer sees a complete project.
+    return migrateProject(JSON.parse(row.data) as Project);
   } catch {
     return null;
   }

@@ -35,6 +35,30 @@ export interface ZoomKeyframe {
   cy: number;
 }
 
+/**
+ * Where the zoom keyframes come from.
+ *
+ * `auto` derives them from the recorded cursor track. That needs the OS to
+ * report the global cursor position, which Wayland deliberately does not, so
+ * `manual` lets the user author the same timeline by hand — it is the only
+ * zoom available on Wayland, and useful everywhere else.
+ */
+export type ZoomMode = "auto" | "manual";
+
+/**
+ * A user-authored zoom moment: hold `scale` on (`cx`, `cy`) for `durationMs`,
+ * easing in before and out after. Times are in *source* time, like the trim,
+ * so a stop keeps pointing at the same frame when the trim moves.
+ */
+export interface ZoomStop {
+  id: string;
+  t: number;
+  durationMs: number;
+  scale: number;
+  cx: number;
+  cy: number;
+}
+
 export interface Callout {
   id: string;
   t: number;
@@ -110,7 +134,12 @@ export interface Project {
   cursorTrack: Point[];
   zoom: {
     enabled: boolean;
+    mode: ZoomMode;
+    /** Render input, always clip-relative. Derived — never edited directly. */
     keyframes: ZoomKeyframe[];
+    /** Source for `mode: "manual"`. Ignored in `auto`, but kept so toggling back and forth is lossless. */
+    stops: ZoomStop[];
+    /** Source for `mode: "auto"`: 0..1 slider mapped to a max zoom scale. */
     intensity: number;
   };
   cursorStyle: CursorStyle;

@@ -14,6 +14,25 @@ export interface ZoomBuildOptions {
 
 const DEFAULT_MIN_DWELL = 900;
 
+/**
+ * Shifts a raw cursor track from source time into clip time.
+ *
+ * Recording samples are stamped from the start of the capture, but everything
+ * downstream of the trim (`setpts=PTS-STARTPTS`) sees time starting at 0. Both
+ * the zoom timeline and the cursor-highlight overlay must therefore use the
+ * same shifted track, or the highlight drifts by exactly the trim offset.
+ *
+ * Samples outside the clip are dropped: they cannot be drawn and would only
+ * stretch the interpolation between the frames that can.
+ */
+export function toClipTime(track: Point[], startMs: number, durationMs?: number): Point[] {
+  const limit = typeof durationMs === "number" ? Math.max(0, durationMs) : Infinity;
+  return track
+    .filter((p) => Number.isFinite(p.t))
+    .map((p) => ({ ...p, t: p.t - startMs }))
+    .filter((p) => p.t >= 0 && p.t <= limit);
+}
+
 /** Cubic ease-in-out on a normalized 0..1 progress value. */
 export function easeInOut(progress: number): number {
   const p = clamp(progress, 0, 1);
