@@ -108,6 +108,7 @@ export interface ExportArtifact {
   summaryPath: string | null;
   bytes: number;
   durationMs: number;
+  driveUrl?: string;
 }
 
 export interface SourceMedia {

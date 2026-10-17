@@ -130,6 +130,26 @@ export interface MediaInfo {
   hasVideo: boolean;
 }
 
+export interface DriveStatus {
+  configured: boolean;
+  clientSource: "app" | "env" | null;
+  clientId: string | null;
+  connected: boolean;
+  email: string | null;
+}
+
+export interface DriveFile {
+  id: string;
+  name: string;
+  webViewLink: string;
+}
+
+export interface DriveProgress {
+  path: string;
+  sent: number;
+  total: number;
+}
+
 // ---------------------------------------------------------------------------
 // High-level wrappers
 // ---------------------------------------------------------------------------
@@ -177,6 +197,18 @@ export const bridge = {
   deleteProject: (id: string) => invoke<boolean>("delete_project", { id }),
   transcribe: (audioPath: string, hasAudio: boolean) =>
     invoke<RustTranscript>("transcribe", { audioPath, hasAudio }),
+  driveStatus: () => invoke<DriveStatus>("drive_status"),
+  driveSaveClient: (clientId: string, clientSecret: string) =>
+    invoke<DriveStatus>("drive_save_client", { clientId, clientSecret }),
+  driveClearClient: () => invoke<DriveStatus>("drive_clear_client"),
+  driveConnect: () => invoke<DriveStatus>("drive_connect"),
+  driveDisconnect: () => invoke<DriveStatus>("drive_disconnect"),
+  driveUpload: (path: string) => invoke<DriveFile>("drive_upload", { path }),
+  openUrl: async (url: string) => {
+    if (!isTauri()) throw new BridgeUnavailableError("Opening links");
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+  },
 };
 
 interface RustTranscript {

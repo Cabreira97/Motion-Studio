@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::capture::{self, CaptureCapabilities, CursorSample, NativeRecording};
+use crate::drive::{self, DriveFile, DrivePaths, DriveStatus};
 use crate::filename;
 use crate::media::{self, MediaInfo, ProcessOutput};
 use crate::session::{Session, TickPayload};
@@ -20,6 +21,7 @@ pub struct AppState {
     pub session: Session,
     pub cursor: capture::CursorSampler,
     pub recordings_dir: std::path::PathBuf,
+    pub drive: DrivePaths,
     /// The capture running on the native backend, where there is one. Only one
     /// at a time: a second portal session would leave the first recording with
     /// no way to stop it.
@@ -691,4 +693,51 @@ mod tests {
         assert!(result.available);
         assert_eq!(result.text, "");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Google Drive (opt-in)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn drive_status(state: State<'_, AppState>) -> DriveStatus {
+    drive::status(&state.drive)
+}
+
+#[tauri::command]
+pub fn drive_save_client(
+    state: State<'_, AppState>,
+    client_id: String,
+    client_secret: String,
+) -> Result<DriveStatus, String> {
+    drive::save_client(&state.drive, &client_id, &client_secret)
+}
+
+#[tauri::command]
+pub async fn drive_clear_client(state: State<'_, AppState>) -> Result<DriveStatus, String> {
+    drive::clear_client(&state.drive).await
+}
+
+#[tauri::command]
+pub async fn drive_connect(app: AppHandle, state: State<'_, AppState>) -> Result<DriveStatus, String> {
+    drive::connect(&app, &state.drive).await
+}
+
+#[tauri::command]
+pub async fn drive_disconnect(state: State<'_, AppState>) -> Result<DriveStatus, String> {
+    drive::disconnect(&state.drive).await
+}
+
+#[tauri::command]
+pub async fn drive_upload(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<DriveFile, String> {
+    let file = std::fs::canonicalize(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let root = std::fs::canonicalize(&state.recordings_dir).map_err(|e| e.to_string())?;
+    if !file.starts_with(&root) {
+        return Err("Only recordings and exports can be uploaded to Google Drive.".into());
+    }
+    drive::upload(&app, &state.drive, file).await
 }

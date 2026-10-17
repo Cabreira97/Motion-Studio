@@ -8,12 +8,15 @@ import {
   toMediaUrl,
   type AppInfo,
   type CaptureCapabilities,
+  type DriveProgress,
+  type DriveStatus,
   type TickPayload,
 } from "./lib/bridge.js";
 import { createRecorder, recorderSupported, type Recorder } from "./lib/recorder.js";
 import { loadProjects, persistProject, removeProject } from "./lib/projects.js";
 import { LANGUAGES, useI18n, type Lang, type TranslationKey } from "./lib/i18n.js";
 import { CalloutEditor } from "./components/CalloutEditor.js";
+import { DriveButton, DriveSection, DriveSetupView, type DriveProps } from "./components/Drive.js";
 import { EditStage } from "./components/EditStage.js";
 import { SourcePicker } from "./components/SourcePicker.js";
 import { RecordingBanner, TimerText } from "./components/Timer.js";
@@ -36,6 +39,7 @@ import {
   withCrop,
   withPreset,
   withTrim,
+  withExportDriveUrl,
   withZoomMode,
   withZoomTimeline,
 } from "./core/project.js";
@@ -49,7 +53,7 @@ import type {
   Project,
 } from "./core/types.js";
 
-type View = "library" | "record" | "edit";
+type View = "library" | "record" | "edit" | "drive";
 type RecState = "idle" | "starting" | "recording" | "stopping";
 
 const KIND_KEY: Record<CaptureKind, TranslationKey> = {
@@ -97,9 +101,16 @@ export default function App() {
   const [exportWarnings, setExportWarnings] = useState<string[]>([]);
   const [lastExport, setLastExport] = useState<ExportArtifact | null>(null);
 
+  const [driveStatus, setDriveStatus] = useState<DriveStatus | null>(null);
+  const [driveConnecting, setDriveConnecting] = useState(false);
+  const [driveError, setDriveError] = useState<string | null>(null);
+  const [driveUploads, setDriveUploads] = useState<Record<string, number>>({});
+
   const recorderRef = useRef<Recorder | null>(null);
   const stoppingRef = useRef(false);
   const timerRef = useRef<number | null>(null);
+  const projectsRef = useRef<Project[]>([]);
+  projectsRef.current = projects;
 
   const activeProject = useMemo(
     () => projects.find((p) => p.id === activeId) ?? null,
@@ -115,13 +126,15 @@ export default function App() {
         if (cancelled) return;
         setProjects(loaded);
         if (isTauri()) {
-          const [info, capabilities] = await Promise.all([
+          const [info, capabilities, drive] = await Promise.all([
             bridge.getAppInfo(),
             bridge.captureCapabilities(),
+            bridge.driveStatus(),
           ]);
           if (cancelled) return;
           setAppInfo(info);
           setCaps(capabilities);
+          setDriveStatus(drive);
         }
         setBoot("ready");
       } catch (error) {
@@ -263,6 +276,11 @@ export default function App() {
     void listen<number>("export://progress", (ms) => setExportProgressMs(ms)).then((d) =>
       disposers.push(d),
     );
+    void listen<DriveProgress>("drive://progress", ({ path, sent, total }) =>
+      setDriveUploads((prev) =>
+        path in prev ? { ...prev, [path]: total > 0 ? sent / total : 1 } : prev,
+      ),
+    ).then((d) => disposers.push(d));
     return () => disposers.forEach((dispose) => dispose());
   }, [handleStop]);
 
@@ -335,6 +353,89 @@ export default function App() {
     }
   }, [activeProject, appInfo, commit, t]);
 
+  const connectDrive = useCallback(async (): Promise<boolean> => {
+    setDriveError(null);
+    setDriveConnecting(true);
+    try {
+      const status = await bridge.driveConnect();
+      setDriveStatus(status);
+      return status.connected;
+    } catch (error) {
+      setDriveError(errMessage(error));
+      return false;
+    } finally {
+      setDriveConnecting(false);
+    }
+  }, []);
+
+  const disconnectDrive = useCallback(async () => {
+    setDriveError(null);
+    try {
+      setDriveStatus(await bridge.driveDisconnect());
+    } catch (error) {
+      setDriveError(errMessage(error));
+    }
+  }, []);
+
+  const uploadToDrive = useCallback(
+    async (projectId: string, artifact: ExportArtifact) => {
+      setDriveError(null);
+      if (!driveStatus?.connected && !(await connectDrive())) return;
+      const path = artifact.videoPath;
+      setDriveUploads((prev) => ({ ...prev, [path]: 0 }));
+      try {
+        const file = await bridge.driveUpload(path);
+        const latest = projectsRef.current.find((p) => p.id === projectId);
+        if (latest) commit(withExportDriveUrl(latest, artifact.id, file.webViewLink));
+      } catch (error) {
+        setDriveError(errMessage(error));
+        setDriveStatus(await bridge.driveStatus().catch(() => null));
+      } finally {
+        setDriveUploads(({ [path]: _done, ...rest }) => rest);
+      }
+    },
+    [driveStatus, connectDrive, commit],
+  );
+
+  const saveDriveClient = useCallback(async (clientId: string, clientSecret: string) => {
+    setDriveError(null);
+    try {
+      setDriveStatus(await bridge.driveSaveClient(clientId, clientSecret));
+      return true;
+    } catch (error) {
+      setDriveError(errMessage(error));
+      return false;
+    }
+  }, []);
+
+  const clearDriveClient = useCallback(async () => {
+    setDriveError(null);
+    try {
+      setDriveStatus(await bridge.driveClearClient());
+    } catch (error) {
+      setDriveError(errMessage(error));
+    }
+  }, []);
+
+  const drive: DriveProps = {
+    status: driveStatus,
+    connecting: driveConnecting,
+    error: driveError,
+    uploads: driveUploads,
+    onConnect: () => void connectDrive(),
+    onDisconnect: () => void disconnectDrive(),
+    onUpload: (artifact) => {
+      if (activeProject) void uploadToDrive(activeProject.id, artifact);
+    },
+    onOpen: (url) => void bridge.openUrl(url).catch((error) => setDriveError(errMessage(error))),
+    onSetup: () => {
+      setDriveError(null);
+      setView("drive");
+    },
+    onSaveClient: saveDriveClient,
+    onClearClient: () => void clearDriveClient(),
+  };
+
   if (boot === "loading") return <LoadingState label={t("boot.loading")} />;
   if (boot === "error") return <ErrorState message={bootError} onRetry={() => location.reload()} />;
 
@@ -360,6 +461,13 @@ export default function App() {
             onClick={() => setView("record")}
           >
             {t("nav.new")}
+          </button>
+          <button
+            type="button"
+            className={`nav__link ${view === "drive" ? "nav__link--active" : ""}`}
+            onClick={() => setView("drive")}
+          >
+            {t("nav.drive")}
           </button>
         </nav>
         <div className="topbar__meta">
@@ -457,6 +565,8 @@ export default function App() {
           </section>
         )}
 
+        {view === "drive" && <DriveSetupView drive={drive} />}
+
         {view === "edit" && activeProject && (
           <EditView
             project={activeProject}
@@ -466,6 +576,7 @@ export default function App() {
             exportError={exportError}
             exportWarnings={exportWarnings}
             lastExport={lastExport}
+            drive={drive}
             onChange={commit}
             onExport={() => void handleExport()}
             onBack={() => setView("library")}
@@ -587,6 +698,7 @@ function EditView({
   exportError,
   exportWarnings,
   lastExport,
+  drive,
   onChange,
   onExport,
   onBack,
@@ -600,6 +712,7 @@ function EditView({
   exportError: string | null;
   exportWarnings: string[];
   lastExport: ExportArtifact | null;
+  drive: DriveProps;
   onChange: (project: Project) => void;
   onExport: () => void;
   onBack: () => void;
@@ -636,6 +749,10 @@ function EditView({
   const setCallouts = (callouts: Callout[]) => onChange({ ...project, callouts });
 
   const setPreset = (presetId: string) => onChange(withPreset(project, presetId));
+
+  const latestExport = lastExport
+    ? (project.exports.find((a) => a.id === lastExport.id) ?? lastExport)
+    : null;
 
   return (
     <section className="edit">
@@ -976,13 +1093,13 @@ function EditView({
             ))}
           </div>
 
-          {lastExport && (
+          {latestExport && (
             <SuccessState
               title={t("edit.exportComplete")}
-              description={`${formatBytes(lastExport.bytes)} · ${formatDuration(lastExport.durationMs)}`}
+              description={`${formatBytes(latestExport.bytes)} · ${formatDuration(latestExport.durationMs)}`}
             >
               <ul className="artifact-list">
-                {exportArtifacts(lastExport).map((item) => (
+                {exportArtifacts(latestExport).map((item) => (
                   <li key={item.path}>
                     <span className="artifact-list__label">{item.label}</span>
                     <code title={item.path}>{item.path}</code>
@@ -992,11 +1109,16 @@ function EditView({
                     <button type="button" className="btn btn--ghost btn--sm" onClick={() => onReveal(item.path)}>
                       {t("edit.reveal")}
                     </button>
+                    {item.path === latestExport.videoPath && (
+                      <DriveButton artifact={latestExport} drive={drive} />
+                    )}
                   </li>
                 ))}
               </ul>
             </SuccessState>
           )}
+
+          <DriveSection drive={drive} />
 
           {project.exports.length > 0 && (
             <div className="control">
@@ -1013,6 +1135,7 @@ function EditView({
                     >
                       {t("edit.reveal")}
                     </button>
+                    <DriveButton artifact={artifact} drive={drive} />
                   </li>
                 ))}
               </ul>

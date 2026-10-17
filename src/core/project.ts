@@ -231,6 +231,13 @@ export function addExport(project: Project, artifact: ExportArtifact): Project {
   return touch({ ...project, exports: [artifact, ...project.exports] });
 }
 
+export function withExportDriveUrl(project: Project, exportId: string, driveUrl: string): Project {
+  return touch({
+    ...project,
+    exports: project.exports.map((a) => (a.id === exportId ? { ...a, driveUrl } : a)),
+  });
+}
+
 export function summarizeTrim(project: Project): string {
   const durationMs = Math.max(0, project.trim.endMs - project.trim.startMs);
   return `${formatDuration(project.trim.startMs)} → ${formatDuration(project.trim.endMs)} (${formatDuration(durationMs)})`;

@@ -7,6 +7,7 @@ import {
   timestampName,
   withCrop,
   withPreset,
+  withExportDriveUrl,
   withTrim,
 } from "../src/core/project.js";
 import type { ExportArtifact, SourceMedia } from "../src/core/types.js";
@@ -101,6 +102,25 @@ describe("project mutations", () => {
     };
     const project = addExport(make(), artifact);
     expect(project.exports[0]!.id).toBe("a");
+  });
+
+  it("records the Drive link on a single export", () => {
+    const base: ExportArtifact = {
+      id: "a",
+      createdAt: 1,
+      presetId: "mp4-1080p",
+      videoPath: "/tmp/a.mp4",
+      posterPath: null,
+      transcriptPath: null,
+      summaryPath: null,
+      bytes: 1,
+      durationMs: 1,
+    };
+    const project = addExport(addExport(make(), base), { ...base, id: "b", videoPath: "/tmp/b.mp4" });
+    const next = withExportDriveUrl(project, "a", "https://drive.google.com/file/d/x/view");
+    expect(next.exports.find((e) => e.id === "a")!.driveUrl).toBe("https://drive.google.com/file/d/x/view");
+    expect(next.exports.find((e) => e.id === "b")!.driveUrl).toBeUndefined();
+    expect(project.exports.find((e) => e.id === "a")!.driveUrl).toBeUndefined();
   });
 });
 
