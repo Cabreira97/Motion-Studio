@@ -1,6 +1,6 @@
 [package]
 name = "motion-studio-local"
-version = "0.1.0"
+version = "1.0.0"
 description = "Motion Studio: a personal, local-first screen recorder with auto cursor zoom"
 authors = ["you"]
 license = ""
