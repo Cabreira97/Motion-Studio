@@ -50,6 +50,14 @@ pub struct NativeRecording {
     /// and more on a busy one; zero means no picture was ever captured.
     pub delivered: u64,
     pub has_audio: bool,
+    /// Where the pointer was, over the recording's own timeline.
+    ///
+    /// Comes from the capture stream rather than from [`CursorSampler`]: on
+    /// Wayland no client can read the global pointer position, and the portal
+    /// reporting it per frame is the only source there. Empty when the portal
+    /// would not report it, in which case the frontend falls back to the
+    /// sampler's track.
+    pub cursor: Vec<CursorSample>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,7 +76,7 @@ pub struct CaptureCapabilities {
 }
 
 pub fn capabilities() -> CaptureCapabilities {
-    let cursor = probe_pointer();
+    let cursor = probe_cursor();
     CaptureCapabilities {
         screen: true,
         window: true,
@@ -275,6 +283,10 @@ impl Drop for X11Pointer {
 /// has no equivalent of `XQueryPointer`. Under XWayland the call "succeeds"
 /// but only tracks motion over XWayland surfaces, which would produce a
 /// plausible-looking yet wrong zoom track — so refuse instead of guessing.
+///
+/// This is not the end of the story on Wayland: the screen-capture portal will
+/// report the pointer per frame if it supports metadata cursor mode, which is
+/// why [`probe_cursor`] asks it first and only falls back here.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn wayland_session() -> bool {
     let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
@@ -287,9 +299,10 @@ fn open_pointer() -> Result<Box<dyn PointerSource>, String> {
 
     if wayland_session() {
         return Err(
-            "Wayland does not expose the global cursor position to applications, so auto-zoom \
-             cannot follow the cursor. Use manual zoom in the editor to place zoom moments \
-             yourself, or log into an X11/Xorg session to enable cursor following."
+            "Wayland does not expose the global cursor position to applications, and this \
+             desktop's screen-capture portal will not report it either, so auto-zoom cannot \
+             follow the cursor. Use manual zoom in the editor to place zoom moments yourself, \
+             or log into an X11/Xorg session to enable cursor following."
                 .to_string(),
         );
     }
@@ -344,6 +357,21 @@ fn probe_pointer() -> Result<(), String> {
     open_pointer().map(|_| ())
 }
 
+/// Whether a cursor track can be recorded at all, and why not when it cannot.
+///
+/// Two unrelated sources answer this. Where capture is native the cursor comes
+/// from the capture stream itself — the portal reports the pointer per frame,
+/// which is the only way to learn it on Wayland — and the `XQueryPointer` path
+/// below is irrelevant. That path is still the fallback, because a portal that
+/// cannot do metadata cursor mode leaves nothing else.
+fn probe_cursor() -> Result<(), String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if crate::native_capture::cursor_metadata_available() {
+        return Ok(());
+    }
+    probe_pointer()
+}
+
 /// Samples the OS cursor on a background thread while a recording is running.
 #[derive(Clone)]
 pub struct CursorSampler {
@@ -365,8 +393,11 @@ impl CursorSampler {
         }
     }
 
+    /// Whether a cursor track can be recorded at all — by this sampler or by
+    /// the capture backend. Answers what `capture_capabilities` answers, so
+    /// `get_app_info` cannot disagree with it.
     pub fn is_supported(&self) -> bool {
-        probe_pointer().is_ok()
+        probe_cursor().is_ok()
     }
 
     pub fn start(&self, interval_ms: u64) {
@@ -418,7 +449,11 @@ impl CursorSampler {
 
 /// Throttle: record a sample when the cursor actually moved, plus a heartbeat
 /// every 250 ms so long dwells still anchor the zoom timeline.
-fn keep_sample(previous: Option<&CursorSample>, next: &CursorSample) -> bool {
+///
+/// Shared with the native backend, which produces its track from the capture
+/// stream rather than from this sampler — the editor reads one shape of track
+/// and it should be thinned the same way whichever side filled it.
+pub(crate) fn keep_sample(previous: Option<&CursorSample>, next: &CursorSample) -> bool {
     match previous {
         Some(prev) => {
             let moved = (prev.x - next.x).abs() + (prev.y - next.y).abs();

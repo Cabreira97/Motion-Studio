@@ -4,11 +4,14 @@ import {
   buildRenderArgs,
   buildZoomExpression,
   choosePosterTime,
+  clampTextBox,
   computeCropPixels,
+  computeStageLayout,
   escapeDrawtext,
   escapeFilterPath,
   buildGraph,
   fitInside,
+  zoomWindow,
   type RenderPlan,
 } from "../src/core/filtergraph.js";
 import { getPreset, presetCodecArgs, resolveOutputSize, EXPORT_PRESETS } from "../src/core/presets.js";
@@ -337,5 +340,84 @@ describe("poster + probe helpers", () => {
     const args = buildProbeArgs("/tmp/out.mp4");
     expect(args[0]).toBe("ffprobe");
     expect(args[args.length - 1]).toBe("/tmp/out.mp4");
+  });
+});
+
+describe("stage layout shared with the preview", () => {
+  it("places the content centred inside the padding", () => {
+    const layout = computeStageLayout({
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      crop: { x: 0, y: 0, width: 1, height: 1 },
+      framing: { ...DEFAULT_FRAMING, paddingPx: 48 },
+      presetId: "mp4-1080p",
+    });
+    expect(layout.out).toEqual({ width: 1920, height: 1080 });
+    // 1920x1080 inside a 1824x984 box is height-bound.
+    expect(layout.content.height).toBe(984);
+    expect(layout.content.x).toBe((1920 - layout.content.width) / 2);
+    expect(layout.content.y).toBe(48);
+  });
+
+  it("clamps the corner radius to half the content box", () => {
+    const layout = computeStageLayout({
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      crop: { x: 0, y: 0, width: 1, height: 0.05 },
+      framing: { ...DEFAULT_FRAMING, cornerRadiusPx: 400 },
+      presetId: "mp4-1080p",
+    });
+    expect(layout.radiusPx).toBe(Math.floor(layout.content.height / 2));
+  });
+
+  it("is the same geometry the graph is built from", () => {
+    const p = plan({
+      crop: { x: 0.1, y: 0.2, width: 0.6, height: 0.5 },
+      framing: { ...DEFAULT_FRAMING, paddingPx: 32 },
+    });
+    const layout = computeStageLayout({
+      sourceWidth: p.sourceWidth,
+      sourceHeight: p.sourceHeight,
+      crop: p.crop,
+      framing: p.framing,
+      presetId: p.presetId,
+    });
+    const graph = buildGraph(p).filterComplex;
+    expect(graph).toContain(
+      `crop=${layout.base.width}:${layout.base.height}:${layout.base.x}:${layout.base.y}`,
+    );
+    expect(graph).toContain(`scale=${layout.content.width}:${layout.content.height}`);
+    expect(graph).toContain(
+      `pad=${layout.out.width}:${layout.out.height}:${layout.content.x}:${layout.content.y}`,
+    );
+  });
+});
+
+describe("zoom window", () => {
+  it("never goes below 1, matching the zoompan clamp", () => {
+    expect(zoomWindow(0.4, 0.5, 0.5)).toEqual({ scale: 1, x: 0, y: 0 });
+  });
+
+  it("centres the window on the focus point", () => {
+    expect(zoomWindow(2, 0.5, 0.5)).toEqual({ scale: 2, x: 0.25, y: 0.25 });
+  });
+
+  it("keeps the window inside the frame when the focus is at an edge", () => {
+    expect(zoomWindow(2, 0, 1)).toEqual({ scale: 2, x: 0, y: 0.5 });
+  });
+});
+
+describe("callout box clamping", () => {
+  it("centres a box that fits", () => {
+    expect(clampTextBox(500, 100, 1000)).toBe(450);
+  });
+
+  it("pushes a box back inside both edges", () => {
+    expect(clampTextBox(0, 100, 1000)).toBe(0);
+    expect(clampTextBox(1000, 100, 1000)).toBe(900);
+  });
+
+  it("pins a box wider than the canvas to the left edge, as drawtext does", () => {
+    expect(clampTextBox(500, 1200, 1000)).toBe(0);
   });
 });

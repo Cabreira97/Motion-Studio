@@ -20,7 +20,7 @@
  * step, in both backends.
  */
 
-import { bridge } from "./bridge.js";
+import { bridge, type CursorSample } from "./bridge.js";
 
 export type CaptureKind = "screen" | "window" | "region";
 
@@ -41,6 +41,14 @@ export interface RecordingResult {
   hasAudio: boolean;
   width: number;
   height: number;
+  /**
+   * Where the pointer was, when the recorder itself observed it.
+   *
+   * `null` from the webview recorder, which sees no pointer and leaves this to
+   * the OS sampler. The native one reads it off the capture stream, because on
+   * Wayland that is the only place it exists.
+   */
+  cursorTrack: CursorSample[] | null;
 }
 
 /** What `App` drives, whichever backend is behind it. */
@@ -359,6 +367,9 @@ export class ScreenRecorder implements Recorder {
       hasAudio: this.hasAudio,
       width: this.resultWidth,
       height: this.resultHeight,
+      // `getDisplayMedia` carries no pointer information, so the OS sampler is
+      // the only source here.
+      cursorTrack: null,
     };
     // Diagnose before cleanup, while the track state is still readable and
     // `elapsedMs` still has a start time to measure from.
@@ -450,6 +461,10 @@ export class NativeRecorder implements Recorder {
       hasAudio: recording.hasAudio,
       width: recording.width,
       height: recording.height,
+      // Read off the capture stream frame by frame, already timestamped
+      // against the file this backend wrote. Empty when the portal declined to
+      // report the pointer, which is a fall back and not a failure.
+      cursorTrack: recording.cursor.length > 0 ? recording.cursor : null,
     };
   }
 

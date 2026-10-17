@@ -84,6 +84,15 @@ export interface CaptureCapabilities {
   videoBackend: "native" | "webview";
 }
 
+/** One recorded pointer position (mirrors the Rust `CursorSample`). */
+export interface CursorSample {
+  /** Milliseconds from the start of the recording. */
+  t: number;
+  /** Normalized 0..1 within the captured picture. */
+  x: number;
+  y: number;
+}
+
 /** A recording the native backend has already written (mirrors `NativeRecording`). */
 export interface NativeRecording {
   path: string;
@@ -94,6 +103,15 @@ export interface NativeRecording {
   /** Frames the compositor delivered; zero means nothing was captured. */
   delivered: number;
   hasAudio: boolean;
+  /**
+   * Where the pointer was, from the capture stream itself.
+   *
+   * This is the only cursor source on Wayland, where no application can read
+   * the global pointer position — the portal reports it per frame instead.
+   * Empty when the portal would not report it, and then the OS sampler's track
+   * is used instead.
+   */
+  cursor: CursorSample[];
 }
 
 export interface ProcessOutput {
@@ -145,7 +163,7 @@ export const bridge = {
   sessionState: () => invoke<SessionState>("session_state"),
   cursorStart: (intervalMs?: number) =>
     invoke<void>("cursor_start", { intervalMs: intervalMs ?? null }),
-  cursorStop: () => invoke<Array<{ t: number; x: number; y: number }>>("cursor_stop"),
+  cursorStop: () => invoke<CursorSample[]>("cursor_stop"),
   listProjects: () => invoke<ProjectRow[]>("list_projects"),
   getProject: (id: string) => invoke<ProjectRow | null>("get_project", { id }),
   saveProject: (project: Project) =>

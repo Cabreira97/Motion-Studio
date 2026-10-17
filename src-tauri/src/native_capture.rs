@@ -34,6 +34,13 @@
 //! * **Writing to ffmpeg must not happen on the PipeWire loop.** Encoding is
 //!   slower than capture, and a blocking write would stall the loop and drop
 //!   frames at the source — which would then look like a capture problem.
+//!
+//! The portal is also the only place the pointer can be observed. Wayland hides
+//! the global cursor position from every client, so `XQueryPointer` has no
+//! equivalent and cursor-following zoom had nothing to follow. Asking for
+//! `CursorMode::Metadata` makes the compositor report the pointer per frame —
+//! at the cost of no longer drawing it, so the cursor bitmap is blended into
+//! the picture here instead.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -48,7 +55,7 @@ use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, S
 use ashpd::enumflags2::BitFlags;
 use pipewire as pw;
 use pw::{properties::properties, spa};
-use crate::capture::NativeRecording;
+use crate::capture::{CursorSample, NativeRecording, keep_sample};
 
 /// How long to wait for the user to answer the portal picker before giving up.
 ///
@@ -62,6 +69,28 @@ const PICKER_TIMEOUT: Duration = Duration::from_secs(120);
 /// and not a slow start. Reported rather than recorded, because a capture that
 /// silently yields nothing is exactly the bug this module replaces.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to wait for the portal to say which cursor modes it supports.
+///
+/// This runs during a capability query, not a recording, so a portal that is
+/// slow to answer must not hold up the UI. Answering "no" early only costs the
+/// cursor-following zoom option, which the user can still place by hand.
+const CURSOR_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The largest cursor bitmap this capture accepts, per edge.
+///
+/// A budget rather than a sanity check: the same number sizes the metadata
+/// PipeWire allocates on every buffer, so it is paid per frame. 128x128 covers
+/// the largest cursor themes in practice and costs 64 KiB a buffer.
+const MAX_CURSOR_EDGE: u32 = 128;
+
+/// Upper bound on recorded pointer positions, about 4 MiB of them.
+///
+/// The source rate is the compositor's, not ours, and a long recording on a
+/// busy screen would otherwise grow this without limit. Hitting the cap loses
+/// the tail of the cursor track, which degrades the zoom; growing without
+/// bound would lose the recording.
+const MAX_CURSOR_MOMENTS: usize = 200_000;
 
 /// What to point the portal at. The region crop is applied later, on export, so
 /// it captures a whole monitor like `Screen` does.
@@ -106,6 +135,92 @@ fn ffmpeg_pix_fmt(format: spa::param::video::VideoFormat) -> Option<(&'static st
     }
 }
 
+/// Byte offsets of each channel inside a 4-byte packed pixel.
+///
+/// SPA format names are in memory order — `BGRx` is byte 0 blue, byte 1 green,
+/// byte 2 red, byte 3 unused — which is also how ffmpeg reads `bgr0`. Keeping
+/// this as a table rather than branching per format is what lets one blend
+/// routine serve the frame and the cursor bitmap at once, which matters because
+/// the two arrive in different orders: the frame is typically `BGRx` and the
+/// cursor `BGRA`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Channels {
+    r: usize,
+    g: usize,
+    b: usize,
+    /// `None` for the `x` formats, which carry no alpha at all.
+    a: Option<usize>,
+}
+
+fn channels(format: spa::param::video::VideoFormat) -> Option<Channels> {
+    use spa::param::video::VideoFormat as F;
+    match format {
+        F::BGRx => Some(Channels { r: 2, g: 1, b: 0, a: None }),
+        F::RGBx => Some(Channels { r: 0, g: 1, b: 2, a: None }),
+        F::BGRA => Some(Channels { r: 2, g: 1, b: 0, a: Some(3) }),
+        F::RGBA => Some(Channels { r: 0, g: 1, b: 2, a: Some(3) }),
+        _ => None,
+    }
+}
+
+/// A cursor image, unpacked to tightly packed RGBA.
+///
+/// Cached across frames: the compositor sends the bitmap only when the cursor
+/// image changes and sends position alone the rest of the time, so a frame
+/// without a bitmap still has to draw the last one. The hotspot travels with
+/// the image because it is only meaningful alongside it.
+struct CursorBitmap {
+    width: usize,
+    height: usize,
+    /// Where inside the bitmap the pointer actually points.
+    hotspot_x: i32,
+    hotspot_y: i32,
+    /// `width * height * 4`, in R, G, B, A order.
+    pixels: Vec<u8>,
+}
+
+/// What one frame said about the cursor image.
+///
+/// Three cases and not two, because "no bitmap in this buffer" and "the cursor
+/// has no picture" are different things on the wire and look identical if
+/// collapsed: the first has to keep drawing the cached image, the second has to
+/// stop. Collapsing them leaves a pointer frozen on screen for the rest of the
+/// recording every time the cursor is hidden — while typing, for instance.
+enum CursorImage {
+    /// `bitmap_offset` was zero: keep whatever was last drawn.
+    Unchanged,
+    Changed(CursorBitmap),
+    /// A bitmap carrying no pixel data at all. The cursor is invisible.
+    Hidden,
+}
+
+/// What the compositor reported about the pointer on one frame.
+struct CursorShot {
+    /// Hotspot position in frame pixels — the point the pointer is at.
+    x: i32,
+    y: i32,
+    image: CursorImage,
+}
+
+/// A pointer position as it was reported, on the monotonic clock.
+///
+/// Not yet a [`CursorSample`]: those are timestamped relative to the start of
+/// the written file, and that origin is not known until the encoder starts.
+struct CursorMoment {
+    at: Instant,
+    x: f64,
+    y: f64,
+}
+
+/// The frame being drawn into: packed pixels plus how to read them.
+struct FrameView<'a> {
+    pixels: &'a mut [u8],
+    width: usize,
+    height: usize,
+    bpp: usize,
+    channels: Channels,
+}
+
 /// The most recent frame, plus what is needed to interpret it.
 ///
 /// One slot rather than a queue: the writer paces against the clock and only
@@ -130,6 +245,206 @@ struct Shared {
     /// Signals the writer that the first frame landed, so it does not have to
     /// poll for the format it needs to configure ffmpeg.
     arrived: Condvar,
+    /// Pointer positions as the compositor reported them. Converted to
+    /// recording-relative milliseconds at the end, against the same origin the
+    /// encoder paces from — the two clocks have to agree or a cursor-following
+    /// zoom drifts away from the picture it is following.
+    cursor: Mutex<Vec<CursorMoment>>,
+    /// When the encoder started pacing frames: time zero of the written file.
+    origin: Mutex<Option<Instant>>,
+}
+
+/// Reads the pointer off a captured buffer, copying out what it needs.
+///
+/// Copying rather than borrowing is forced and useful at once: the metadata
+/// borrows the buffer immutably while the frame data borrows it mutably, so the
+/// two cannot be held together, and an owned bitmap is what lets it be cached
+/// for the frames that carry no new one.
+fn read_cursor(buffer: &pw::buffer::Buffer<'_>) -> Option<CursorShot> {
+    let meta = buffer.find_meta::<spa::buffer::meta::MetaCursor>()?;
+    // An id of zero means this buffer carries no new cursor data at all, which
+    // is not the same as the cursor sitting at the origin.
+    if !meta.is_valid() {
+        return None;
+    }
+    let position = meta.position();
+    let hotspot = meta.hotspot();
+    // `MetaCursor::bitmap` is `None` exactly when `bitmap_offset` is zero,
+    // which the SPA header defines as "no new bitmap information" — this buffer
+    // carries a position and nothing else.
+    let image = match meta.bitmap() {
+        None => CursorImage::Unchanged,
+        // A zero format is also defined as "no new bitmap information", so it
+        // has to be ruled out before a zero offset is read as invisible.
+        Some(bitmap) if !bitmap.is_valid() => CursorImage::Unchanged,
+        Some(bitmap) if bitmap.offset() == 0 => CursorImage::Hidden,
+        Some(bitmap) => match read_cursor_bitmap(bitmap, hotspot) {
+            Some(parsed) => CursorImage::Changed(parsed),
+            // A bitmap that is there but unusable — an unmapped format, or one
+            // larger than the budget. Keep the last image rather than blanking
+            // the pointer over something this side could not read.
+            None => CursorImage::Unchanged,
+        },
+    };
+    Some(CursorShot {
+        x: position.x,
+        y: position.y,
+        image,
+    })
+}
+
+fn read_cursor_bitmap(
+    bitmap: &spa::buffer::meta::MetaBitmap,
+    hotspot: spa::utils::Point,
+) -> Option<CursorBitmap> {
+    let size = bitmap.size();
+    if size.width == 0
+        || size.height == 0
+        || size.width > MAX_CURSOR_EDGE
+        || size.height > MAX_CURSOR_EDGE
+    {
+        return None;
+    }
+    let source = channels(bitmap.format())?;
+    let width = size.width as usize;
+    let height = size.height as usize;
+    let row = width * 4;
+    let reported = bitmap.stride().unsigned_abs() as usize;
+    let stride = if reported >= row { reported } else { row };
+    let data = bitmap.bitmap_data()?;
+    if data.len() < stride * (height - 1) + row {
+        return None;
+    }
+
+    let mut pixels = vec![0u8; row * height];
+    for y in 0..height {
+        for x in 0..width {
+            let src = y * stride + x * 4;
+            let dst = y * row + x * 4;
+            pixels[dst] = data[src + source.r];
+            pixels[dst + 1] = data[src + source.g];
+            pixels[dst + 2] = data[src + source.b];
+            pixels[dst + 3] = source.a.map_or(255, |a| data[src + a]);
+        }
+    }
+    Some(CursorBitmap {
+        width,
+        height,
+        hotspot_x: hotspot.x,
+        hotspot_y: hotspot.y,
+        pixels,
+    })
+}
+
+/// Alpha-blends a cursor into a packed-RGB frame, in place.
+///
+/// `at_x`/`at_y` are the pointer position; the hotspot is subtracted here, so
+/// the tip of the arrow lands on the pixel the pointer is actually over. The
+/// bitmap is treated as premultiplied — the Wayland convention for the
+/// `ARGB8888` cursor surfaces the portal's bitmap comes from — so the composite
+/// is `dst = src + dst * (1 - a)` with no divide by alpha. Reading it as
+/// straight alpha instead draws a bright halo around the pointer.
+///
+/// Pixels outside the frame are skipped rather than clamped, so a cursor half
+/// off the edge of the screen is drawn half.
+fn blend_cursor(frame: &mut FrameView<'_>, cursor: &CursorBitmap, at_x: i32, at_y: i32) {
+    let origin_x = at_x - cursor.hotspot_x;
+    let origin_y = at_y - cursor.hotspot_y;
+
+    for cy in 0..cursor.height {
+        let fy = origin_y + cy as i32;
+        if fy < 0 || fy as usize >= frame.height {
+            continue;
+        }
+        for cx in 0..cursor.width {
+            let fx = origin_x + cx as i32;
+            if fx < 0 || fx as usize >= frame.width {
+                continue;
+            }
+            let src = (cy * cursor.width + cx) * 4;
+            let alpha = u32::from(cursor.pixels[src + 3]);
+            if alpha == 0 {
+                continue;
+            }
+            let dst = fy as usize * frame.width * frame.bpp + fx as usize * frame.bpp;
+            let under_weight = 255 - alpha;
+            for (offset, channel) in [
+                (frame.channels.r, 0usize),
+                (frame.channels.g, 1),
+                (frame.channels.b, 2),
+            ] {
+                let over = u32::from(cursor.pixels[src + channel]);
+                let under = u32::from(frame.pixels[dst + offset]);
+                frame.pixels[dst + offset] =
+                    (over + (under * under_weight + 127) / 255).min(255) as u8;
+            }
+            if let Some(offset) = frame.channels.a {
+                let under = u32::from(frame.pixels[dst + offset]);
+                frame.pixels[dst + offset] =
+                    (alpha + (under * under_weight + 127) / 255).min(255) as u8;
+            }
+        }
+    }
+}
+
+/// Turns raw pointer moments into a recording-relative cursor track.
+///
+/// Timestamps are measured from the encoder's origin so they line up with the
+/// frames that were written. Moments from before it — captured while ffmpeg was
+/// starting — are pinned to zero rather than dropped, so a zoom that follows
+/// the cursor has somewhere to start. The same throttle the OS sampler uses is
+/// applied here, on the converted samples, because it needs the timestamps.
+fn cursor_track(origin: Option<Instant>, moments: &[CursorMoment]) -> Vec<CursorSample> {
+    let Some(origin) = origin else {
+        return Vec::new();
+    };
+    let mut track: Vec<CursorSample> = Vec::with_capacity(moments.len());
+    for moment in moments {
+        let sample = CursorSample {
+            t: moment.at.saturating_duration_since(origin).as_millis() as u64,
+            x: moment.x,
+            y: moment.y,
+        };
+        if keep_sample(track.last(), &sample) {
+            track.push(sample);
+        }
+    }
+    track
+}
+
+/// Whether the portal can report the pointer position as stream metadata.
+///
+/// This is the only thing that makes cursor-following zoom possible on Wayland,
+/// where no client can read the global pointer position. Probed on its own
+/// thread with its own runtime: the caller is a synchronous Tauri command that
+/// may already be running inside one, and nesting `block_on` panics.
+///
+/// Cached, because the answer is a property of the installed portal and the
+/// check costs a D-Bus round trip on a path the UI queries freely.
+pub fn cursor_metadata_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::thread::spawn(|| {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return false;
+            };
+            runtime.block_on(async {
+                let probe = async {
+                    let proxy = Screencast::new().await?;
+                    proxy.available_cursor_modes().await
+                };
+                match tokio::time::timeout(CURSOR_PROBE_TIMEOUT, probe).await {
+                    Ok(Ok(modes)) => modes.contains(CursorMode::Metadata),
+                    _ => false,
+                }
+            })
+        })
+        .join()
+        .unwrap_or(false)
+    })
 }
 
 /// A capture in progress.
@@ -266,8 +581,8 @@ fn capture_thread(
         .build()
         .map_err(|e| format!("could not start the portal runtime: {e}"))?;
 
-    let (node_id, fd) = match runtime.block_on(open_portal(kind)) {
-        Ok(pair) => pair,
+    let (node_id, fd, cursor_metadata) = match runtime.block_on(open_portal(kind)) {
+        Ok(opened) => opened,
         Err(error) => {
             let message = describe_portal_error(&error);
             let _ = ready_tx.send(Err(message.clone()));
@@ -288,7 +603,14 @@ fn capture_thread(
             .map_err(|e| format!("could not start the encoder thread: {e}"))?
     };
 
-    let pipewire_result = run_pipewire(node_id, fd, Arc::clone(&shared), quit_rx, &ready_tx);
+    let pipewire_result = run_pipewire(
+        node_id,
+        fd,
+        cursor_metadata,
+        Arc::clone(&shared),
+        quit_rx,
+        &ready_tx,
+    );
 
     stop_writer.store(true, Ordering::Release);
     let written = match writer.join() {
@@ -298,6 +620,18 @@ fn capture_thread(
 
     pipewire_result?;
     let written = written?;
+
+    let cursor = {
+        let origin = *shared
+            .origin
+            .lock()
+            .map_err(|_| "the recording origin was poisoned".to_string())?;
+        let moments = shared
+            .cursor
+            .lock()
+            .map_err(|_| "the cursor track was poisoned".to_string())?;
+        cursor_track(origin, &moments)
+    };
 
     let slot = shared
         .slot
@@ -315,6 +649,7 @@ fn capture_thread(
         frames: written,
         delivered,
         has_audio: mic,
+        cursor,
     })
 }
 
@@ -337,9 +672,14 @@ fn describe_portal_error(error: &ashpd::Error) -> String {
     }
 }
 
+/// Opens a ScreenCast session.
+///
+/// The third element of the result says whether the pointer will arrive as
+/// stream metadata, which decides both that a cursor track can be recorded and
+/// that the cursor has to be drawn into the frame by hand.
 async fn open_portal(
     kind: CaptureKind,
-) -> ashpd::Result<(u32, std::os::fd::OwnedFd)> {
+) -> ashpd::Result<(u32, std::os::fd::OwnedFd, bool)> {
     let proxy = Screencast::new().await?;
 
     // Ask what the compositor supports rather than assuming. Window capture is
@@ -353,17 +693,28 @@ async fn open_portal(
         )));
     }
 
+    // Prefer the pointer as metadata. It is the only way to learn where the
+    // cursor is on Wayland, which is what cursor-following zoom needs, and the
+    // compositor stops drawing the pointer in exchange — so it gets blended in
+    // here instead. `Embedded` keeps the picture right and loses the position;
+    // `Hidden` is the last resort of a portal offering neither.
+    let modes = proxy.available_cursor_modes().await.unwrap_or_default();
+    let cursor_mode = if modes.contains(CursorMode::Metadata) {
+        CursorMode::Metadata
+    } else if modes.contains(CursorMode::Embedded) || modes.is_empty() {
+        // An empty set is a portal too old to publish the property at all;
+        // `Embedded` is the mode every version has supported.
+        CursorMode::Embedded
+    } else {
+        CursorMode::Hidden
+    };
+
     let session = proxy.create_session(Default::default()).await?;
     proxy
         .select_sources(
             &session,
             SelectSourcesOptions::default()
-                // Let the compositor composite the pointer into the picture. On
-                // Wayland an application cannot read the pointer position at
-                // all, which is why cursor-following zoom degrades to manual
-                // there; a cursor baked into the frame at least keeps the
-                // recording watchable.
-                .set_cursor_mode(CursorMode::Embedded)
+                .set_cursor_mode(cursor_mode)
                 .set_sources(BitFlags::from(wanted))
                 .set_multiple(false)
                 .set_restore_token(None)
@@ -383,12 +734,19 @@ async fn open_portal(
         .to_owned();
 
     let fd = proxy.open_pipe_wire_remote(&session, Default::default()).await?;
-    Ok((stream.pipe_wire_node_id(), fd))
+    Ok((
+        stream.pipe_wire_node_id(),
+        fd,
+        cursor_mode == CursorMode::Metadata,
+    ))
 }
 
 fn run_pipewire(
     node_id: u32,
     fd: std::os::fd::OwnedFd,
+    // Whether the portal granted `CursorMode::Metadata`. When it did, the
+    // compositor no longer draws the pointer, so this side has to.
+    cursor_metadata: bool,
     shared: Arc<Shared>,
     quit_rx: pw::channel::Receiver<()>,
     ready_tx: &SyncSender<Result<(), String>>,
@@ -414,6 +772,13 @@ fn run_pipewire(
     )
     .map_err(|e| format!("PipeWire stream: {e}"))?;
 
+    // The cursor arrives sparsely: a position on most frames, a bitmap only
+    // when the image changes. Both are remembered across callbacks so every
+    // frame is drawn with the pointer that was last reported, instead of the
+    // cursor blinking out between updates.
+    let mut cursor_image: Option<CursorBitmap> = None;
+    let mut cursor_at: Option<(i32, i32)> = None;
+
     let _listener = stream
         .add_local_listener_with_user_data(spa::param::video::VideoInfoRaw::default())
         .param_changed(|_, format, id, param| {
@@ -436,6 +801,22 @@ fn run_pipewire(
         })
         .process(move |stream, format| {
             let Some(mut buffer) = stream.dequeue_buffer() else { return };
+
+            // Read the pointer before the frame data: the metadata borrows the
+            // buffer immutably and `datas_mut` borrows it mutably.
+            let mut moved = None;
+            if cursor_metadata {
+                if let Some(shot) = read_cursor(&buffer) {
+                    match shot.image {
+                        CursorImage::Unchanged => {}
+                        CursorImage::Changed(bitmap) => cursor_image = Some(bitmap),
+                        CursorImage::Hidden => cursor_image = None,
+                    }
+                    cursor_at = Some((shot.x, shot.y));
+                    moved = Some((shot.x, shot.y));
+                }
+            }
+
             let datas = buffer.datas_mut();
             let Some(data) = datas.first_mut() else { return };
 
@@ -464,6 +845,24 @@ fn run_pipewire(
                 return;
             }
 
+            // Record the pointer against the frame it was reported with, which
+            // is what makes the track normalized to the same picture the editor
+            // zooms into. A position outside the frame is the pointer sitting on
+            // another monitor, and is dropped rather than clamped to an edge.
+            if let Some((x, y)) = moved {
+                if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height {
+                    if let Ok(mut moments) = shared.cursor.lock() {
+                        if moments.len() < MAX_CURSOR_MOMENTS {
+                            moments.push(CursorMoment {
+                                at: Instant::now(),
+                                x: f64::from(x) / width as f64,
+                                y: f64::from(y) / height as f64,
+                            });
+                        }
+                    }
+                }
+            }
+
             let Ok(mut guard) = shared.slot.lock() else { return };
             let slot = guard.get_or_insert_with(|| FrameSlot {
                 width,
@@ -483,6 +882,28 @@ fn run_pipewire(
                 let dst = y * row;
                 slot.pixels[dst..dst + row].copy_from_slice(&bytes[src..src + row]);
             }
+
+            // Metadata cursor mode means the compositor left the pointer out of
+            // the picture, so draw it. Every frame, from the last reported
+            // position — not only the ones that carried an update, or the cursor
+            // would flicker on a screen that is changing faster than it moves.
+            if let (Some(image), Some((x, y))) = (cursor_image.as_ref(), cursor_at) {
+                if let Some(channels) = channels(format.format()) {
+                    blend_cursor(
+                        &mut FrameView {
+                            pixels: &mut slot.pixels,
+                            width,
+                            height,
+                            bpp,
+                            channels,
+                        },
+                        image,
+                        x,
+                        y,
+                    );
+                }
+            }
+
             slot.delivered += 1;
             shared.arrived.notify_all();
         })
@@ -498,8 +919,16 @@ fn run_pipewire(
         })
     };
 
-    let mut params = format_params();
-    let mut pods = [spa::pod::Pod::from_bytes(&params).ok_or("malformed format pod")?];
+    let format_pod = format_params();
+    let meta_pod = cursor_meta_params();
+    let mut pods = Vec::with_capacity(2);
+    pods.push(spa::pod::Pod::from_bytes(&format_pod).ok_or("malformed format pod")?);
+    if cursor_metadata {
+        // Only asked for when it will be used: the size below is allocated on
+        // every buffer, so requesting it under `Embedded` would pay for a
+        // bitmap the compositor already drew.
+        pods.push(spa::pod::Pod::from_bytes(&meta_pod).ok_or("malformed cursor metadata pod")?);
+    }
     stream
         .connect(
             spa::utils::Direction::Input,
@@ -508,7 +937,6 @@ fn run_pipewire(
             &mut pods,
         )
         .map_err(|e| format!("could not connect to the capture stream: {e}"))?;
-    params.clear();
 
     // Connected. Anything after this is a capture that started and then went
     // wrong, which is reported through the summary rather than the start call.
@@ -576,6 +1004,44 @@ fn format_params() -> Vec<u8> {
     .into_inner()
 }
 
+/// The buffer metadata this capture needs, as a serialized SPA pod.
+///
+/// Asking for `SPA_META_Cursor` is what makes the compositor report the pointer
+/// per frame; without it the metadata is simply absent, whatever cursor mode the
+/// portal agreed to. The size is a budget PipeWire allocates on every buffer, so
+/// it covers the two structs plus the largest bitmap that will be accepted and
+/// nothing more.
+///
+/// Built from `Property` directly rather than the `property!` macro, which
+/// requires a key type with `as_raw()`; the `SPA_PARAM_META_*` keys are plain
+/// constants.
+fn cursor_meta_params() -> Vec<u8> {
+    let size = std::mem::size_of::<spa::sys::spa_meta_cursor>()
+        + std::mem::size_of::<spa::sys::spa_meta_bitmap>()
+        + (MAX_CURSOR_EDGE as usize) * (MAX_CURSOR_EDGE as usize) * 4;
+    let obj = spa::pod::Object {
+        type_: spa::utils::SpaTypes::ObjectParamMeta.as_raw(),
+        id: spa::param::ParamType::Meta.as_raw(),
+        properties: vec![
+            spa::pod::Property::new(
+                spa::sys::SPA_PARAM_META_type,
+                spa::pod::Value::Id(spa::utils::Id(spa::sys::SPA_META_Cursor)),
+            ),
+            spa::pod::Property::new(
+                spa::sys::SPA_PARAM_META_size,
+                spa::pod::Value::Int(size as i32),
+            ),
+        ],
+    };
+    spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(obj),
+    )
+    .expect("serializing a fixed metadata pod cannot fail")
+    .0
+    .into_inner()
+}
+
 /// Paces captured frames into ffmpeg and returns how many were written.
 ///
 /// The source rate is variable — the compositor sends a frame when the screen
@@ -636,6 +1102,13 @@ fn write_frames(
     let mut written = 0u64;
     let started = Instant::now();
     let mut write_error = None;
+
+    // Publish time zero of the file. The cursor track is timestamped against
+    // this and not against the portal session, which starts earlier — by the
+    // picker dialog, the negotiation and ffmpeg's own startup.
+    if let Ok(mut origin) = shared.origin.lock() {
+        *origin = Some(started);
+    }
 
     while !stop.load(Ordering::Acquire) {
         // Deadlines from a fixed origin rather than sleeping a fixed interval,
@@ -741,4 +1214,224 @@ fn spawn_encoder(
         .stdout(std::process::Stdio::null())
         .spawn()
         .map_err(|e| format!("could not start ffmpeg for the recording: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 4-byte-per-pixel frame in `BGRx`, filled with one colour.
+    fn frame(width: usize, height: usize, bgr: [u8; 3]) -> Vec<u8> {
+        let mut pixels = vec![0u8; width * height * 4];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[0] = bgr[0];
+            pixel[1] = bgr[1];
+            pixel[2] = bgr[2];
+        }
+        pixels
+    }
+
+    /// A cursor of one colour at one alpha, premultiplied as the compositor
+    /// would hand it over.
+    fn cursor(width: usize, height: usize, rgb: [u8; 3], alpha: u8) -> CursorBitmap {
+        let mut pixels = vec![0u8; width * height * 4];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[0] = (u32::from(rgb[0]) * u32::from(alpha) / 255) as u8;
+            pixel[1] = (u32::from(rgb[1]) * u32::from(alpha) / 255) as u8;
+            pixel[2] = (u32::from(rgb[2]) * u32::from(alpha) / 255) as u8;
+            pixel[3] = alpha;
+        }
+        CursorBitmap {
+            width,
+            height,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            pixels,
+        }
+    }
+
+    fn bgrx(width: usize, height: usize, pixels: &mut [u8]) -> FrameView<'_> {
+        FrameView {
+            pixels,
+            width,
+            height,
+            bpp: 4,
+            channels: channels(spa::param::video::VideoFormat::BGRx).unwrap(),
+        }
+    }
+
+    #[test]
+    fn channel_offsets_follow_memory_order() {
+        use spa::param::video::VideoFormat as F;
+        assert_eq!(
+            channels(F::BGRx),
+            Some(Channels { r: 2, g: 1, b: 0, a: None })
+        );
+        assert_eq!(
+            channels(F::RGBA),
+            Some(Channels { r: 0, g: 1, b: 2, a: Some(3) })
+        );
+        // Planar formats are never negotiated, and guessing an offset for one
+        // would write the cursor into the wrong plane.
+        assert_eq!(channels(F::I420), None);
+    }
+
+    #[test]
+    fn an_opaque_cursor_replaces_the_pixels_under_it() {
+        let mut pixels = frame(2, 2, [0, 0, 0]);
+        // Red cursor onto a black BGRx frame: red is byte 2.
+        blend_cursor(&mut bgrx(2, 2, &mut pixels), &cursor(2, 2, [255, 0, 0], 255), 0, 0);
+        assert_eq!(&pixels[0..3], &[0, 0, 255]);
+        assert_eq!(&pixels[12..15], &[0, 0, 255]);
+    }
+
+    #[test]
+    fn a_transparent_cursor_leaves_the_frame_alone() {
+        let mut pixels = frame(2, 2, [10, 20, 30]);
+        let before = pixels.clone();
+        blend_cursor(&mut bgrx(2, 2, &mut pixels), &cursor(2, 2, [255, 255, 255], 0), 0, 0);
+        assert_eq!(pixels, before);
+    }
+
+    #[test]
+    fn a_half_transparent_cursor_blends_premultiplied() {
+        let mut pixels = frame(1, 1, [0, 0, 200]);
+        blend_cursor(&mut bgrx(1, 1, &mut pixels), &cursor(1, 1, [0, 0, 0], 128), 0, 0);
+        // Premultiplied black at a=128 darkens: 0 + 200 * 127/255 ≈ 100. Read as
+        // straight alpha it would instead stay near 200 and look untouched.
+        assert_eq!(pixels[2], 100);
+    }
+
+    #[test]
+    fn the_hotspot_decides_where_the_bitmap_lands() {
+        let mut pixels = frame(3, 1, [0, 0, 0]);
+        let mut pointer = cursor(1, 1, [255, 255, 255], 255);
+        pointer.hotspot_x = 2;
+        // The pointer is at x=2, but points two pixels into its own bitmap, so
+        // the bitmap starts at x=0.
+        blend_cursor(&mut bgrx(3, 1, &mut pixels), &pointer, 2, 0);
+        assert_eq!(pixels[0], 255);
+        assert_eq!(pixels[4], 0);
+    }
+
+    #[test]
+    fn a_cursor_off_the_edge_is_drawn_in_part() {
+        let mut pixels = frame(2, 2, [0, 0, 0]);
+        // Top-left at (1, 1): only one of the four cursor pixels is on screen.
+        blend_cursor(&mut bgrx(2, 2, &mut pixels), &cursor(2, 2, [255, 255, 255], 255), 1, 1);
+        assert_eq!(pixels[0], 0);
+        assert_eq!(pixels[12], 255);
+    }
+
+    #[test]
+    fn a_cursor_fully_outside_the_frame_touches_nothing() {
+        let mut pixels = frame(2, 2, [7, 7, 7]);
+        let before = pixels.clone();
+        let pointer = cursor(2, 2, [255, 255, 255], 255);
+        blend_cursor(&mut bgrx(2, 2, &mut pixels), &pointer, -9, -9);
+        blend_cursor(&mut bgrx(2, 2, &mut pixels), &pointer, 9, 9);
+        assert_eq!(pixels, before);
+    }
+
+    #[test]
+    fn a_track_without_an_origin_is_empty() {
+        // The encoder never started, so there is no timeline to place the
+        // samples on. Reporting them against the portal session instead would
+        // offset the whole track by however long the picker was open.
+        let moments = vec![CursorMoment {
+            at: Instant::now(),
+            x: 0.5,
+            y: 0.5,
+        }];
+        assert!(cursor_track(None, &moments).is_empty());
+    }
+
+    #[test]
+    fn a_track_is_timestamped_from_the_encoder_origin() {
+        let origin = Instant::now();
+        let moments = vec![
+            CursorMoment {
+                at: origin,
+                x: 0.1,
+                y: 0.1,
+            },
+            CursorMoment {
+                at: origin + Duration::from_millis(500),
+                x: 0.9,
+                y: 0.9,
+            },
+        ];
+        let track = cursor_track(Some(origin), &moments);
+        assert_eq!(track.len(), 2);
+        assert_eq!(track[0].t, 0);
+        assert_eq!(track[1].t, 500);
+        assert_eq!(track[1].x, 0.9);
+    }
+
+    #[test]
+    fn moments_from_before_the_encoder_are_pinned_to_zero() {
+        let origin = Instant::now();
+        let early = origin
+            .checked_sub(Duration::from_millis(300))
+            .expect("the test clock is not near the epoch");
+        let moments = vec![CursorMoment {
+            at: early,
+            x: 0.25,
+            y: 0.75,
+        }];
+        let track = cursor_track(Some(origin), &moments);
+        // Kept rather than dropped: it is where the cursor was when recording
+        // began, which is exactly what a zoom needs to start from.
+        assert_eq!(track.len(), 1);
+        assert_eq!(track[0].t, 0);
+    }
+
+    #[test]
+    fn a_still_cursor_is_thinned_to_a_heartbeat() {
+        let origin = Instant::now();
+        let moments: Vec<CursorMoment> = (0..10)
+            .map(|i| CursorMoment {
+                at: origin + Duration::from_millis(i * 40),
+                x: 0.5,
+                y: 0.5,
+            })
+            .collect();
+        let track = cursor_track(Some(origin), &moments);
+        // 400 ms of a motionless cursor: the first sample plus one heartbeat.
+        assert_eq!(track.len(), 2);
+        assert_eq!(track[0].t, 0);
+        assert_eq!(track[1].t, 280);
+    }
+
+    #[test]
+    fn the_cursor_metadata_pod_asks_for_a_cursor() {
+        let bytes = cursor_meta_params();
+        assert!(spa::pod::Pod::from_bytes(&bytes).is_some());
+
+        let (_, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes)
+            .expect("the pod this module builds must parse back");
+        let spa::pod::Value::Object(object) = value else {
+            panic!("expected an object pod");
+        };
+        assert_eq!(object.id, spa::param::ParamType::Meta.as_raw());
+        let types: Vec<_> = object
+            .properties
+            .iter()
+            .filter(|p| p.key == spa::sys::SPA_PARAM_META_type)
+            .map(|p| p.value.clone())
+            .collect();
+        assert_eq!(
+            types,
+            vec![spa::pod::Value::Id(spa::utils::Id(spa::sys::SPA_META_Cursor))]
+        );
+
+        // The size is the budget PipeWire allocates per buffer: both structs
+        // plus the largest bitmap that will be accepted.
+        let expected = (std::mem::size_of::<spa::sys::spa_meta_cursor>()
+            + std::mem::size_of::<spa::sys::spa_meta_bitmap>()
+            + (MAX_CURSOR_EDGE as usize).pow(2) * 4) as i32;
+        assert!(object.properties.iter().any(|p| {
+            p.key == spa::sys::SPA_PARAM_META_size && p.value == spa::pod::Value::Int(expected)
+        }));
+    }
 }

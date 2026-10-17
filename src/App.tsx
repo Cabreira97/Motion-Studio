@@ -14,6 +14,7 @@ import { createRecorder, recorderSupported, type Recorder } from "./lib/recorder
 import { loadProjects, persistProject, removeProject } from "./lib/projects.js";
 import { LANGUAGES, useI18n, type Lang, type TranslationKey } from "./lib/i18n.js";
 import { CalloutEditor } from "./components/CalloutEditor.js";
+import { EditStage } from "./components/EditStage.js";
 import { SourcePicker } from "./components/SourcePicker.js";
 import { RecordingBanner, TimerText } from "./components/Timer.js";
 import {
@@ -168,6 +169,14 @@ export default function App() {
         cursorTrack = samples.map((s) => ({ t: s.t, x: s.x, y: s.y }));
       }
       const result = await recorder.stop();
+
+      // The recorder's own track wins where it has one. On Wayland the OS
+      // sampler cannot see the pointer at all — no client can — so the only
+      // positions that exist come from the capture stream, and they are already
+      // timestamped against the file that was just written.
+      if (result.cursorTrack) {
+        cursorTrack = result.cursorTrack.map((s) => ({ t: s.t, x: s.x, y: s.y }));
+      }
 
       let sourcePath = "";
       let sourceWidth = result.width;
@@ -570,23 +579,6 @@ function LibraryView({
 // Edit
 // ---------------------------------------------------------------------------
 
-/**
- * A human-readable reason for a `<video>` failure. The numeric code is kept
- * because it is what makes a report actionable: 4 means the source itself was
- * refused, 2 means it was reachable but the transfer broke.
- */
-function describeMediaError(error: MediaError | null): string {
-  if (!error) return "unknown";
-  const names: Record<number, string> = {
-    1: "aborted",
-    2: "network",
-    3: "decode",
-    4: "source not supported",
-  };
-  const name = names[error.code] ?? "unknown";
-  return error.message ? `${name} ${error.code}: ${error.message}` : `${name} ${error.code}`;
-}
-
 function EditView({
   project,
   previewUrl,
@@ -620,11 +612,7 @@ function EditView({
 
   // Manual zoom is authored against the preview: the playhead gives the time,
   // clicking the frame gives the focus point.
-  const videoRef = useRef<HTMLVideoElement | null>(null);
   const [playheadMs, setPlayheadMs] = useState(0);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  // A new source gets a clean slate; the element reports its own failure again.
-  useEffect(() => setPreviewError(null), [previewUrl]);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const stops = project.zoom.stops;
   const manualZoom = project.zoom.mode === "manual";
@@ -637,15 +625,10 @@ function EditView({
     onChange(addZoomStop(project, { id, t: playheadMs }));
   };
 
-  /** Click-to-focus: maps a click on the stage to a 0..1 point on the frame. */
-  const focusFromClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (project.zoom.mode !== "manual" || !selectedStop) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-    const cx = (event.clientX - rect.left) / rect.width;
-    const cy = (event.clientY - rect.top) / rect.height;
-    onChange(updateZoomStop(project, selectedStop.id, { cx, cy }));
-  };
+  // The stage drives the playhead from a `requestAnimationFrame` loop, so this
+  // has to keep its identity or the loop restarts on every frame.
+  const onPlayheadMs = useCallback((ms: number) => setPlayheadMs(ms), []);
+  const clearFocus = useCallback(() => setSelectedStopId(null), []);
 
   const setFraming = (patch: Partial<Framing>) =>
     onChange({ ...project, framing: { ...project.framing, ...patch } });
@@ -669,56 +652,20 @@ function EditView({
 
       <div className="edit__layout">
         <div className="edit__preview">
-          <div
-            className="stage"
-            style={{
-              aspectRatio: `${project.framing.outputWidth} / ${project.framing.outputHeight}`,
-              background: project.framing.background,
-              padding: `${(project.framing.paddingPx / project.framing.outputHeight) * 100}%`,
-            }}
-          >
-            {previewUrl ? (
-              <video
-                ref={videoRef}
-                className="stage__video"
-                src={previewUrl}
-                controls
-                preload="metadata"
-                onLoadedMetadata={() => setPreviewError(null)}
-                onError={(e) => setPreviewError(describeMediaError(e.currentTarget.error))}
-                onTimeUpdate={(e) => setPlayheadMs(Math.round(e.currentTarget.currentTime * 1000))}
-              />
-            ) : (
-              <div className="stage__placeholder">{t("edit.previewPlaceholder")}</div>
-            )}
-            {previewError && (
-              <div className="stage__placeholder stage__placeholder--error">
-                {t("edit.previewFailed", { reason: previewError })}
-              </div>
-            )}
-            {/* The zoom focus is normalized against the *cropped* frame, which
-                is exactly what this box outlines — so it doubles as the
-                click target for picking a focus point. */}
-            <div
-              className="stage__crop"
-              onClick={focusFromClick}
-              style={{
-                left: `${project.crop.x * 100}%`,
-                top: `${project.crop.y * 100}%`,
-                width: `${project.crop.width * 100}%`,
-                height: `${project.crop.height * 100}%`,
-                borderRadius: project.framing.cornerRadiusPx,
-                ...(pickingFocus ? { pointerEvents: "auto" as const, cursor: "crosshair" } : {}),
-              }}
-            >
-              {pickingFocus && (
-                <span
-                  className="stage__focus"
-                  style={{ left: `${selectedStop.cx * 100}%`, top: `${selectedStop.cy * 100}%` }}
-                />
-              )}
-            </div>
-          </div>
+          <EditStage
+            project={project}
+            previewUrl={previewUrl}
+            playheadMs={playheadMs}
+            onPlayheadMs={onPlayheadMs}
+            focusStop={pickingFocus ? selectedStop : null}
+            onFocus={(cx, cy) =>
+              selectedStop && onChange(updateZoomStop(project, selectedStop.id, { cx, cy }))
+            }
+            onFocusDone={clearFocus}
+            onMoveCallout={(id, x, y) =>
+              setCallouts(project.callouts.map((c) => (c.id === id ? { ...c, x, y } : c)))
+            }
+          />
           <p className="muted">
             {t("edit.summary", {
               summary: summarizeTrim(project),

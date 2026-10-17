@@ -267,6 +267,9 @@ cargo build
 The TypeScript core is where the interesting logic lives and is covered by the
 test suite; the Rust layer is intentionally thin and validated.
 
+[`docs/ROADMAP.md`](docs/ROADMAP.md) lists the known debts in the code and the
+ideas nobody has built yet, plus what is deliberately out of scope.
+
 ## Contributing
 
 Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
